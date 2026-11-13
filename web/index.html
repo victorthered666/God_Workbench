@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>神的使者 · 游戏策划文档工作台</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#" aria-label="返回项目列表"><span class="brand-mark">神</span><span>神的使者<small>GDD WORKBENCH</small></span></a>
+    <div class="top-actions"><span id="service-state" class="service"><i></i>本地工作区</span><button class="text-button" id="open-settings">Agent 设置 <span>⚙</span></button></div>
+  </header>
+  <main id="home" class="home">
+    <section class="hero">
+      <p class="eyebrow">DESIGN WITH EVIDENCE · BUILD WITH CLARITY</p>
+      <h1>让好想法，成为<br><em>可执行的策划。</em></h1>
+      <p class="hero-description">五位策划角色协作，从有据可查的竞品调研，到图文齐备、可落地的游戏设计文档。每一步，都由你掌舵。</p>
+      <button class="primary large" id="new-project">新建策划文档 <span>＋</span></button>
+      <div class="hero-note"><span>◉</span> 人工确认关键决策 <b>·</b> <span>⌁</span> 全程保留证据链 <b>·</b> <span>▱</span> 本地资料归档</div>
+    </section>
+    <section class="workflow-overview" aria-label="工作流程">
+      <div><span>01</span><strong>调研</strong><small>寻找设计依据</small></div><i>→</i>
+      <div><span>02</span><strong>架构</strong><small>搭建规则骨架</small></div><i>→</i>
+      <div><span>03</span><strong>撰写</strong><small>机制与图文落地</small></div><i>→</i>
+      <div><span>04</span><strong>交互</strong><small>补全体验细节</small></div><i>→</i>
+      <div><span>05</span><strong>交付</strong><small>拆解、审核、归档</small></div>
+    </section>
+    <section class="projects-section">
+      <div class="section-heading"><div><p class="eyebrow">YOUR WORKSPACE</p><h2>策划项目</h2></div><span id="project-count"></span></div>
+      <div id="projects" class="projects"><div class="empty-projects"><span>◇</span><h3>从第一个设计问题开始</h3><p>创建项目后，调研、版本、审核与素材都将保存在这里。</p></div></div>
+    </section>
+  </main>
+  <main id="workspace" class="workspace" hidden>
+    <div class="project-head"><button id="back-home" class="back">← 项目</button><div><h1 id="project-title"></h1><p id="project-meta"></p></div><div class="project-head-actions"><button class="secondary" id="revise-project">修改文档</button><button class="primary" id="export-project" disabled>导出交付包</button></div></div>
+    <div id="status-banner" class="status-banner"></div>
+    <div class="workspace-grid">
+      <aside class="stage-panel"><p class="eyebrow">WORKFLOW</p><ol id="stage-list"></ol><div class="agent-card"><span id="active-agent-icon">策</span><div><small>当前负责角色</small><strong id="active-agent"></strong></div></div></aside>
+      <section class="content-panel">
+        <div class="tabs"><button class="active" data-tab="deliverable">阶段产物</button><button data-tab="document">文档预览</button><button data-tab="assets">素材与来源 <span id="asset-count"></span></button><button data-tab="history">版本与日志</button></div>
+        <div id="tab-deliverable" class="tab-content"></div>
+        <div id="tab-document" class="tab-content" hidden><div class="document-toolbar"><span>图文预览</span><button class="secondary small" id="edit-document">编辑 Markdown</button></div><article id="document-preview" class="document"></article><textarea id="document-editor" class="document-editor" hidden></textarea></div>
+        <div id="tab-assets" class="tab-content" hidden><div id="assets-list"></div><h3>检索证据</h3><div id="evidence-list"></div></div>
+        <div id="tab-history" class="tab-content" hidden><h3>阶段版本</h3><div id="versions-list"></div><h3>执行日志</h3><div id="event-list" class="event-list"></div></div>
+      </section>
+    </div>
+  </main>
+  <div id="modal-backdrop" class="modal-backdrop" hidden><section id="modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><button class="modal-close" aria-label="关闭">×</button><div id="modal-content"></div></section></div>
+  <div id="toast" class="toast" role="status"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

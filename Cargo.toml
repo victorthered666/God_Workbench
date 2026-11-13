@@ -1,0 +1,60 @@
+[package]
+name = "gdd-harness"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Native multi-agent game design document workbench"
+license = "MIT"
+
+[lib]
+name = "gdd_harness"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gdd-harness"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+async-trait = "0.1"
+axum = { version = "0.8", features = ["macros", "http1", "tokio", "json", "query"] }
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde", "clock"] }
+comrak = "0.36"
+ammonia = "4.0"
+docx-rs = "0.4.22"
+futures-util = "0.3"
+hmac = "0.12"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+imageproc = "0.25"
+ab_glyph = "0.2"
+parking_lot = "0.12"
+rand = "0.9"
+regex = "1.11"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+schemars = { version = "1.0", features = ["chrono04"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+sha2 = "0.10"
+thiserror = "2.0"
+tokio = { version = "1.48", features = ["full"] }
+tower-http = { version = "0.6", features = ["fs", "trace"] }
+tower = "0.5"
+uuid = { version = "1.18", features = ["v4"] }
+validator = { version = "0.20", features = ["derive"] }
+zip = { version = "4.3", default-features = false, features = ["deflate"] }
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+percent-encoding = "2.3"
+open = "5.3"
+
+[dev-dependencies]
+tempfile = "3.20"
+proptest = "1.7"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
