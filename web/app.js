@@ -93,7 +93,8 @@ function renderWorkspace() {
   $('#stage-list').innerHTML = stages.map(([key, title, description], i) => `<li data-number="${i+1}" class="${key === stage ? 'active' : stageCompleted(key) ? 'done' : ''}"><strong>${title}</strong><small>${description}</small></li>`).join('');
   const running = p.status.startsWith('running:'); const error = p.status === 'interrupted' || p.status === 'needs_human';
   $('#status-banner').className = `status-banner ${running ? 'running ' : ''}${error ? 'error' : ''}`;
-  $('#status-banner').innerHTML = `<span>${running ? '◌' : error ? '!' : '●'}</span><span>${esc(p.error || (p.artifacts.review?.content?.summary?.includes('本地模拟审核') ? '模拟审核 · 仅供验收' : statusText[p.status]) || `正在执行 ${p.status.slice(8)}`)}</span>${running ? `<span id="run-elapsed" class="run-elapsed"></span><button class="secondary small" id="cancel-run">取消</button>` : error && recoverStage() ? '<button class="secondary small" id="recover-run">从当前阶段恢复</button>' : ''}`;
+  const continueStage = (!running && !error) ? nextManualStage(p) : null;
+  $('#status-banner').innerHTML = `<span>${running ? '◌' : error ? '!' : '●'}</span><span>${esc(p.error || (p.artifacts.review?.content?.summary?.includes('本地模拟审核') ? '模拟审核 · 仅供验收' : statusText[p.status]) || `正在执行 ${p.status.slice(8)}`)}</span>${running ? `<span id="run-elapsed" class="run-elapsed"></span><button class="secondary small" id="cancel-run">取消</button>` : continueStage ? `<button class="primary small" id="continue-run">继续：${manualStageLabels[continueStage]}</button>` : error && recoverStage() ? '<button class="secondary small" id="recover-run">从当前阶段恢复</button>' : ''}`;
   if (running) {
     const startEvt = state.detail.events.find((e) => e.kind === 'stage' && e.message.startsWith('开始执行'));
     state.runningSince = startEvt ? new Date(startEvt.created_at).getTime() : Date.now();
@@ -102,11 +103,21 @@ function renderWorkspace() {
   const autorunButton = $('#autorun-toggle'); autorunButton.textContent = `全自动：${state.detail.autorun ? '开' : '关'}`; autorunButton.classList.toggle('active', !!state.detail.autorun);
   if ($('#cancel-run')) $('#cancel-run').onclick = () => action(`/api/projects/${p.id}/cancel`, '已请求取消；已发出的外部请求不会被重复提交');
   if ($('#recover-run')) $('#recover-run').onclick = () => action(`/api/projects/${p.id}/run/${recoverStage()}`, '正在恢复当前阶段');
+  if ($('#continue-run')) $('#continue-run').onclick = () => action(`/api/projects/${p.id}/run/${continueStage}`, `正在继续：${manualStageLabels[continueStage]}`);
   $('#export-project').disabled = p.status !== 'approved'; $('#asset-count').textContent = `(${state.detail.assets.length})`;
   renderArtifact(); renderAssets(); renderHistory();
   if (!state.editing) loadPreview();
 }
 function recoverStage() { const p = state.project; if (p.status === 'needs_human') return 'revise'; if (!p.artifacts.research) return 'research'; if (p.artifacts.research && !p.artifacts.research.approved) return null; if (!p.artifacts.framework) return 'framework'; if (!p.artifacts.framework.approved) return null; if (!p.artifacts.document) return 'document'; if (!p.artifacts.interaction) return 'interaction'; if (!p.artifacts.resources) return 'resources'; return 'review'; }
+const manualStageLabels = { research: '调研分析', framework: '文档框架', document: '文档撰写', interaction: '交互补全', resources: '资源拆解', review: '架构审核', revise: '按审核意见修订复审' };
+function nextManualStage(p) {
+  switch (p.status) {
+    case 'interaction': return 'interaction';
+    case 'resources': return 'resources';
+    case 'review': return (p.artifacts.review && !p.artifacts.review.content.approved) ? 'revise' : 'review';
+    default: return null;
+  }
+}
 function renderArtifact() {
   const p = state.project; const stage = currentStage();
   let key = stage;
