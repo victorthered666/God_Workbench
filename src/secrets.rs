@@ -52,7 +52,17 @@ impl SecretStore {
         let path=self.directory.join("secrets.json");
         let temp=self.directory.join("secrets.json.tmp");
         fs::write(&temp,serde_json::to_string(&all)?)?;
-        fs::rename(temp,path)?;
+        // Windows: replacing an existing file needs the Delete right on the
+        // target; files restricted to (R,W) by an old launcher would fail with
+        // os error 5. Fall back to remove+rename, then to an in-place write.
+        if fs::rename(&temp,&path).is_err() {
+            let _=fs::remove_file(&path);
+            if fs::rename(&temp,&path).is_err() {
+                let bytes=fs::read(&temp)?;
+                fs::write(&path,bytes)?;
+            }
+        }
+        let _=fs::remove_file(&temp);
         self.cache.lock().insert(name.into(),value.into());
         Ok(())
     }
@@ -111,6 +121,9 @@ mod tests {
     fn encrypts_and_reads_without_plaintext() {
         let dir=tempfile::tempdir().unwrap();
         let store=SecretStore::new(dir.path()).unwrap();
+        store.set("TEST_KEY","secret-value").unwrap();
+        store.set("TEST_KEY","second-value").unwrap();
+        assert_eq!(store.get("TEST_KEY").unwrap().unwrap(),"second-value");
         store.set("TEST_KEY","secret-value").unwrap();
         assert_eq!(store.get("TEST_KEY").unwrap().unwrap(),"secret-value");
         assert!(!std::fs::read_to_string(dir.path().join("secrets.json")).unwrap().contains("secret-value"));
