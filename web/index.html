@@ -31,10 +31,10 @@
     </section>
   </main>
   <main id="workspace" class="workspace" hidden>
-    <div class="project-head"><button id="back-home" class="back">← 项目</button><div><h1 id="project-title"></h1><p id="project-meta"></p></div><div class="project-head-actions"><button class="secondary" id="revise-project">修改文档</button><button class="primary" id="export-project" disabled>导出交付包</button></div></div>
+    <div class="project-head"><button id="back-home" class="back">← 项目</button><div><h1 id="project-title"></h1><p id="project-meta"></p></div><div class="project-head-actions"><button class="secondary" id="autorun-toggle">全自动：关</button><button class="secondary" id="revise-project">修改文档</button><button class="primary" id="export-project" disabled>导出交付包</button></div></div>
     <div id="status-banner" class="status-banner"></div>
     <div class="workspace-grid">
-      <aside class="stage-panel"><p class="eyebrow">WORKFLOW</p><ol id="stage-list"></ol><div class="agent-card"><span id="active-agent-icon">策</span><div><small>当前负责角色</small><strong id="active-agent"></strong></div></div></aside>
+      <aside class="stage-panel"><p class="eyebrow">WORKFLOW</p><ol id="stage-list"></ol><div class="agent-card"><span id="active-agent-icon">策</span><pre id="agent-animation" hidden></pre><div><small>当前负责角色</small><strong id="active-agent"></strong></div></div></aside>
       <section class="content-panel">
         <div class="tabs"><button class="active" data-tab="deliverable">阶段产物</button><button data-tab="document">文档预览</button><button data-tab="assets">素材与来源 <span id="asset-count"></span></button><button data-tab="history">版本与日志</button></div>
         <div id="tab-deliverable" class="tab-content"></div>

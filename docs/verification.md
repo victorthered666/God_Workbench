@@ -4,7 +4,7 @@
 
 ## Rust 迁移验证（2026-11-13）
 
-代码栈已从 Python 完全迁移为 Rust 原生实现。旧 Python 源码归档于 `legacy/python/`。
+代码栈已从 Python 完全迁移为 Rust 原生实现。旧 Python 实现已从仓库移除，可追溯 Git 历史早期提交。
 
 - `cargo test`：9 项全部通过。
   - 工作流人工门禁与阶段顺序（`tests/compat.rs`）。

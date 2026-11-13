@@ -28,6 +28,7 @@ pub fn app(repo: Repository, secrets: SecretStore, workflow: Workflow, runner: R
         .route("/api/projects/{id}/run/{stage}",post(run))
         .route("/api/projects/{id}/cancel",post(cancel))
         .route("/api/projects/{id}/revision",post(revision))
+        .route("/api/projects/{id}/autorun",put(autorun))
         .route("/api/projects/{id}/document",put(edit_document))
         .route("/api/projects/{id}/preview",get(preview))
         .route("/api/projects/{id}/asset",get(asset))
@@ -63,7 +64,7 @@ async fn bootstrap(State(state): State<AppState>) -> Result<Json<Value>> {
 
 async fn project(State(state): State<AppState>, Path(id): Path<String>, Query(query): Query<BTreeMap<String,usize>>) -> Result<Json<Value>> {
     let project=state.repo.require(&id)?;
-    Ok(Json(json!({"project":project,"events":state.repo.events(&id)?,"versions":state.repo.versions(&id,query.get("version_limit").copied().unwrap_or(50).clamp(1,100),query.get("version_offset").copied().unwrap_or(0))?,"evidence":state.repo.evidence_list(&id,query.get("evidence_limit").copied().unwrap_or(100).clamp(1,200))?,"assets":state.repo.assets(&id)?})))
+    Ok(Json(json!({"project":project,"autorun":state.repo.setting(&format!("autorun:{id}"),serde_json::json!(false))?,"events":state.repo.events(&id)?,"versions":state.repo.versions(&id,query.get("version_limit").copied().unwrap_or(50).clamp(1,100),query.get("version_offset").copied().unwrap_or(0))?,"evidence":state.repo.evidence_list(&id,query.get("evidence_limit").copied().unwrap_or(100).clamp(1,200))?,"assets":state.repo.assets(&id)?})))
 }
 
 async fn create(State(state): State<AppState>, Json(request): Json<ProjectCreate>) -> Result<(StatusCode,Json<Value>)> {
@@ -92,6 +93,13 @@ async fn run(State(state): State<AppState>, Path((id,stage)): Path<(String,Strin
 async fn cancel(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>> {
     state.runner.cancel(&id)?;
     Ok(Json(json!({"status":"cancel_requested"})))
+}
+
+async fn autorun(State(state): State<AppState>, Path(id): Path<String>, Json(body): Json<Value>) -> Result<Json<Value>> {
+    state.repo.require(&id)?;
+    let enabled=body.get("enabled").and_then(Value::as_bool).ok_or_else(||AppError::Invalid("enabled 必须为布尔值".into()))?;
+    state.repo.set_setting(&format!("autorun:{id}"),json!(enabled))?;
+    Ok(Json(json!({"status":"saved","autorun":enabled})))
 }
 
 async fn revision(State(state): State<AppState>, Path(id): Path<String>, Json(request): Json<RevisionRequest>) -> Result<Json<Value>> {

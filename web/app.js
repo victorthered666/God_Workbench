@@ -1,6 +1,13 @@
 const $ = (selector) => document.querySelector(selector);
 const state = { csrf: '', projects: [], project: null, detail: null, settings: {}, role: 'research', editing: false, timer: null };
 const roles = { research: '调研策划', architect: '架构策划', writer: '文档执行策划', interaction: '交互策划', producer: '初级项目经理' };
+const agentAnimations = {
+  research: [`  o\n /|\\ \u{1F50D}\n / \\`, `  o.\n /|\\_\u{1F50D}\n /|`, ` _o\n |⟩\\ \u{1F50D}\n / \\`],
+  architect: [` _o_\n |‾|_\u{1F4D0}\n / \\`, `  o\n /|\\ \u{1F4D0}\n / \\`, `  o\n /|⟨ \u{1F4D0}\n /|`],
+  writer: [`  o\n /|\\\u{1F9F1}\u{1F9F1}\n / \\`, `  o_\n |\\ \u{1F9F1}\u{1F9F1}\n /|`, `  o\n |\\_\u{1F9F1}\u{1F9F1}\n / \\`],
+  interaction: [`  o\n /|\\_\u2328\uFE0F\n / \\`, `  o/\n /| \u2328\uFE0F\n / \\`, `  o\n /|\\ \u261D\uFE0F\n /|`],
+  producer: [`  o\n /|\\_\u{1F4CB}\n / \\`, `  o\n /| \u2713\u{1F4CB}\n /|`, ` _o\n |⟨ \u{1F4CB}\n / \\`],
+};
 const stages = [
   ['research', '调研分析', '寻找依据与撰写意见'], ['framework', '文档框架', '将意见落地为结构'],
   ['document', '文档撰写', '规则细化与参考图'], ['interaction', '交互补全', '状态、流程与线框图'],
@@ -18,8 +25,35 @@ async function api(path, options = {}) {
 }
 function openModal(content, wide = false) { $('#modal-content').innerHTML = content; $('#modal').classList.toggle('wide', wide); $('#modal-backdrop').hidden = false; }
 function closeModal() { $('#modal-backdrop').hidden = true; $('#modal-content').innerHTML = ''; }
-function showHome() { state.project = null; state.detail = null; clearTimeout(state.timer); $('#workspace').hidden = true; $('#home').hidden = false; renderProjects(); }
+function showHome() { state.project = null; state.detail = null; clearTimeout(state.timer); stopRunAnimation(); $('#workspace').hidden = true; $('#home').hidden = false; renderProjects(); }
 function statusBadge(status, simulated = false) { const waiting = status.includes('review') || status === 'needs_human'; const error = status === 'interrupted' || status === 'needs_human'; return `<span class="badge ${error ? 'error' : waiting ? 'waiting' : ''}">${esc(simulated && status === 'approved' ? '模拟审核 · 仅供验收' : statusText[status] || (status.startsWith('running:') ? '正在执行' : status))}</span>`; }
+function startRunAnimation(roleKey) {
+  stopRunAnimation();
+  state.frameIdx = 0; state.tick = 0;
+  const frames = agentAnimations[roleKey] || agentAnimations.research;
+  $('#active-agent-icon').hidden = true;
+  const pre = $('#agent-animation'); pre.hidden = false; pre.textContent = frames[0];
+  state.animTimer = setInterval(() => {
+    state.frameIdx += 1; state.tick += 1;
+    pre.textContent = frames[state.frameIdx % frames.length];
+    if (state.tick % 2 === 0) updateRunElapsed();
+  }, 400);
+  updateRunElapsed();
+}
+function stopRunAnimation() {
+  if (state.animTimer) { clearInterval(state.animTimer); state.animTimer = null; }
+  const pre = $('#agent-animation'); if (pre) { pre.hidden = true; pre.textContent = ''; }
+  const icon = $('#active-agent-icon'); if (icon) icon.hidden = false;
+  const elapsed = $('#run-elapsed'); if (elapsed) elapsed.textContent = '';
+  state.runningSince = null;
+}
+function updateRunElapsed() {
+  const el = $('#run-elapsed'); if (!el || !state.runningSince) return;
+  const total = Math.max(0, Math.floor((Date.now() - state.runningSince) / 1000));
+  const h = Math.floor(total / 3600), m = Math.floor(total % 3600 / 60), s = total % 60;
+  const mm = String(m).padStart(2, '0'), ss = String(s).padStart(2, '0');
+  el.textContent = `已运行 ${h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`}`;
+}
 function renderProjects() {
   $('#project-count').textContent = `${state.projects.length} 个项目`;
   if (!state.projects.length) return;
@@ -58,8 +92,14 @@ function renderWorkspace() {
   $('#active-agent').textContent = roles[role] || '架构策划';
   $('#stage-list').innerHTML = stages.map(([key, title, description], i) => `<li data-number="${i+1}" class="${key === stage ? 'active' : stageCompleted(key) ? 'done' : ''}"><strong>${title}</strong><small>${description}</small></li>`).join('');
   const running = p.status.startsWith('running:'); const error = p.status === 'interrupted' || p.status === 'needs_human';
-  $('#status-banner').className = `status-banner ${error ? 'error' : ''}`;
-  $('#status-banner').innerHTML = `<span>${running ? '◌' : error ? '!' : '●'}</span><span>${esc(p.error || (p.artifacts.review?.content?.summary?.includes('本地模拟审核') ? '模拟审核 · 仅供验收' : statusText[p.status]) || `正在执行 ${p.status.slice(8)}`)}</span>${running ? '<button class="secondary small" id="cancel-run">取消</button>' : error && recoverStage() ? '<button class="secondary small" id="recover-run">从当前阶段恢复</button>' : ''}`;
+  $('#status-banner').className = `status-banner ${running ? 'running ' : ''}${error ? 'error' : ''}`;
+  $('#status-banner').innerHTML = `<span>${running ? '◌' : error ? '!' : '●'}</span><span>${esc(p.error || (p.artifacts.review?.content?.summary?.includes('本地模拟审核') ? '模拟审核 · 仅供验收' : statusText[p.status]) || `正在执行 ${p.status.slice(8)}`)}</span>${running ? `<span id="run-elapsed" class="run-elapsed"></span><button class="secondary small" id="cancel-run">取消</button>` : error && recoverStage() ? '<button class="secondary small" id="recover-run">从当前阶段恢复</button>' : ''}`;
+  if (running) {
+    const startEvt = state.detail.events.find((e) => e.kind === 'stage' && e.message.startsWith('开始执行'));
+    state.runningSince = startEvt ? new Date(startEvt.created_at).getTime() : Date.now();
+    startRunAnimation(role);
+  } else stopRunAnimation();
+  const autorunButton = $('#autorun-toggle'); autorunButton.textContent = `全自动：${state.detail.autorun ? '开' : '关'}`; autorunButton.classList.toggle('active', !!state.detail.autorun);
   if ($('#cancel-run')) $('#cancel-run').onclick = () => action(`/api/projects/${p.id}/cancel`, '已请求取消；已发出的外部请求不会被重复提交');
   if ($('#recover-run')) $('#recover-run').onclick = () => action(`/api/projects/${p.id}/run/${recoverStage()}`, '正在恢复当前阶段');
   $('#export-project').disabled = p.status !== 'approved'; $('#asset-count').textContent = `(${state.detail.assets.length})`;
@@ -132,6 +172,22 @@ function exportModal() {
   $('#generate-export').onclick = async () => { const button = $('#generate-export'); button.disabled = true; button.textContent = '正在生成 DOCX 与归档…'; try { const data = await api(`/api/projects/${state.project.id}/export`); $('#download-links').innerHTML = `<p class="modal-intro">已保存至：${esc(data.directory)}</p><div class="form-actions"><a class="secondary" href="/api/projects/${state.project.id}/download/markdown">Markdown</a><a class="secondary" href="/api/projects/${state.project.id}/download/docx">DOCX</a><a class="primary" href="/api/projects/${state.project.id}/download/zip">完整资料 ZIP</a></div>`; button.hidden = true; } catch (error) { toast(error.message); button.disabled = false; button.textContent = '生成并整理交付包'; } };
 }
 $('#new-project').onclick = newProject; $('.brand').onclick = (e) => { e.preventDefault(); showHome(); }; $('#back-home').onclick = showHome; $('#open-settings').onclick = () => settingsModal(); $('#revise-project').onclick = revisionModal; $('#export-project').onclick = exportModal;
+$('#autorun-toggle').onclick = async () => {
+  const p = state.project; if (!p) return;
+  const enable = !(state.detail && state.detail.autorun);
+  try {
+    await api(`/api/projects/${p.id}/autorun`, { method: 'PUT', body: JSON.stringify({ enabled: enable }) });
+    toast(enable ? '已开启全自动流程：每步完成后自动确认进入下一步' : '已关闭全自动流程');
+    await refreshProjects(); await loadProject(p.id);
+    if (!enable) return;
+    const cur = state.project;
+    const gate = { research_review: 'research', framework_review: 'framework', revision_review: 'revision_plan' }[cur.status];
+    if (gate) action(`/api/projects/${cur.id}/stages/${gate}/approve`, '全自动：已确认，进入下一阶段');
+    else if (['interaction', 'resources'].includes(cur.status)) action(`/api/projects/${cur.id}/run/${cur.status}`, '全自动：继续下一阶段');
+    else if (cur.status === 'review' && cur.artifacts.review && !cur.artifacts.review.content.approved) action(`/api/projects/${cur.id}/run/revise`, '全自动：按审核意见修订并复审');
+    else if (cur.status === 'review') action(`/api/projects/${cur.id}/run/review`, '全自动：开始架构审核');
+  } catch (error) { toast(error.message); }
+};
 $('.modal-close').onclick = closeModal; $('#modal-backdrop').addEventListener('click', (e) => { if (e.target === $('#modal-backdrop')) closeModal(); }); document.addEventListener('click', (e) => { if (e.target.matches('[data-close]')) closeModal(); }); document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
 document.querySelectorAll('[data-tab]').forEach((button) => button.onclick = () => { document.querySelectorAll('[data-tab]').forEach((b) => b.classList.toggle('active', b === button)); document.querySelectorAll('.tab-content').forEach((el) => el.hidden = el.id !== `tab-${button.dataset.tab}`); if (button.dataset.tab === 'document') loadPreview(); });
 $('#edit-document').onclick = async () => { if (!state.editing) { state.editing = true; $('#document-preview').hidden = true; $('#document-editor').hidden = false; $('#edit-document').textContent = '保存并重新进入资源阶段'; } else { try { await api(`/api/projects/${state.project.id}/document`, { method: 'PUT', body: JSON.stringify({ content: $('#document-editor').value }) }); state.editing = false; $('#document-preview').hidden = false; $('#document-editor').hidden = true; $('#edit-document').textContent = '编辑 Markdown'; toast('正文已保存；请继续资源拆解与审核'); await loadProject(state.project.id); } catch (error) { toast(error.message); } } };

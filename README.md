@@ -2,7 +2,7 @@
 
 一个本地运行的**原生 Rust** 多 Agent 游戏策划工作台。将调研、框架确认、正文撰写、交互补图、资源拆解、架构审核与资料归档放入同一条可追溯流水线。
 
-**代码栈已从 Python 完全迁移为 Rust**：HTTP 服务（Axum/Tokio）、SQLite（rusqlite）、Agent 编排、图片处理（image/imageproc）、DOCX 导出（docx-rs）均为原生实现，不再需要 Python、Node 或 `.venv`。旧 Python 源码归档于 `legacy/python/`，仅作参考，不是运行依赖。
+**代码栈已从 Python 完全迁移为 Rust**：HTTP 服务（Axum/Tokio）、SQLite（rusqlite）、Agent 编排、图片处理（image/imageproc）、DOCX 导出（docx-rs）均为原生实现，不再需要 Python、Node 或 `.venv`。旧 Python 实现已从仓库移除，如需追溯可查看 Git 历史早期提交。
 
 ## 启动
 
@@ -113,6 +113,5 @@ cargo test
   - `export/`：DOCX（docx-rs）、资源附录、归档与清单。
   - `http/`：路由、本机写入令牌、HTML 允许列表清理。
 - `config/agents/`、`agents/`、`skills/`：可单独修改的默认配置、提示词与技能。
-- `web/`：复用的原生中文前端。
-- `legacy/python/`：旧 Python 实现归档，仅作参考。
+- `web/`：复用的原生中文前端（含每个角色的字符动画、耗时显示与全自动流程开关）。
 - `docs/`：内存安全、验证记录、图片 API 调研。
