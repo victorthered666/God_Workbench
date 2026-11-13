@@ -10,10 +10,14 @@ impl AgentExecutor for RejectingAgents {
         Ok(match role {
             Role::Architect if project.status=="review" || project.status.starts_with("running:review") || project.status.starts_with("running:revise")=>json!({"approved":false,"findings":[{"section":"核心循环","problem":"缺少出口","severity":"high","owner":"writer","recommendation":"补充"}],"summary":"不通过"}),
             Role::Architect=>json!({"title":"框架","summary":"框架","sections":[{"id":"loop","title":"核心循环","purpose":"循环","requirements":["采集"],"visuals":[],"acceptance":[]}],"boundaries":[]}),
-            Role::Writer|Role::Interaction=>json!({"markdown":"# 离线模拟\n\n正文"}),
+            Role::Writer=>json!({"markdown":"# 离线模拟\n\n正文"}),
+            Role::Interaction=>json!({"markdown":"## 交互设计补充\n\n修订后的交互说明"}),
             Role::Research=>json!({"summary":"调研","findings":[],"recommendations":[],"writing_advice":[],"limitations":[]}),
             Role::Producer=>json!({"features":[],"art":[],"audio":[]}),
         })
+    }
+    async fn run_writer_patch(&self, _project: &Project, _instruction: String, _feedback: &str) -> gdd_harness::Result<Value> {
+        Ok(json!({"patches":[{"heading":"模拟正文","markdown":"# 模拟正文\n\n修订后的正文"}]}))
     }
     async fn annotate(&self, _project: &Project, _path: &str, _title: &str) -> gdd_harness::Result<Vec<Annotation>> { Ok(vec![]) }
 }

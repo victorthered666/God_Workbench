@@ -9,6 +9,8 @@ use super::{session, vision};
 #[async_trait]
 pub trait AgentExecutor: Send + Sync {
     async fn run(&self, role: Role, project: &Project, instruction: String, feedback: &str) -> Result<Value>;
+    /// 对既有文档的增量修订：只输出需要替换的章节补丁，避免整篇复述导致输出截断。
+    async fn run_writer_patch(&self, project: &Project, instruction: String, feedback: &str) -> Result<Value>;
     async fn annotate(&self, project: &Project, path: &str, title: &str) -> Result<Vec<crate::domain::Annotation>>;
 }
 
@@ -149,9 +151,14 @@ impl AgentExecutor for AgentRuntime {
             Role::Architect if project.status=="review" || project.status.starts_with("running:review") || project.status.starts_with("running:revise") => Ok(serde_json::to_value(self.execute::<crate::domain::Review>(role,project,instruction,feedback,vec![]).await?)?),
             Role::Architect if project.status=="revision_planning" || project.status.starts_with("running:revision_plan") => Ok(serde_json::to_value(self.execute::<crate::domain::ImpactPlan>(role,project,instruction,feedback,vec![]).await?)?),
             Role::Architect => Ok(serde_json::to_value(self.execute::<crate::domain::Framework>(role,project,instruction,feedback,vec![]).await?)?),
-            Role::Writer|Role::Interaction => Ok(serde_json::to_value(self.execute::<crate::domain::DocumentDraft>(role,project,instruction,feedback,vec![]).await?)?),
+            Role::Writer => Ok(serde_json::to_value(self.execute::<crate::domain::DocumentDraft>(role,project,instruction,feedback,vec![]).await?)?),
+            Role::Interaction => Ok(serde_json::to_value(self.execute::<crate::domain::InteractionSupplement>(role,project,instruction,feedback,vec![]).await?)?),
             Role::Producer => Ok(serde_json::to_value(self.execute::<crate::domain::ResourcePlan>(role,project,instruction,feedback,vec![]).await?)?),
         }
+    }
+
+    async fn run_writer_patch(&self, project: &Project, instruction: String, feedback: &str) -> Result<Value> {
+        Ok(serde_json::to_value(self.execute::<crate::domain::DocumentPatches>(Role::Writer,project,instruction,feedback,vec![]).await?)?)
     }
 
     async fn annotate(&self, project: &Project, path: &str, title: &str) -> Result<Vec<crate::domain::Annotation>> {

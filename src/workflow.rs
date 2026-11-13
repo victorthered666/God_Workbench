@@ -10,6 +10,8 @@ pub struct Workflow {
 }
 
 impl Workflow {
+    const MAX_DOCUMENT_BYTES: usize = 2 * 1024 * 1024;
+
     pub fn new(repo: Repository, agents: Arc<dyn AgentExecutor>, config: Config) -> Self { Self { repo, agents, config } }
 
     pub fn create(&self, data: &ProjectCreate) -> Result<Project> {
@@ -79,6 +81,11 @@ impl Workflow {
         Ok(markdown)
     }
 
+    fn ensure_size(&self, markdown: &str) -> Result<()> {
+        if markdown.len()>Self::MAX_DOCUMENT_BYTES { return Err(AppError::Workflow("合并后的正文超过 2 MiB，请拆分为独立章节项目".into())); }
+        Ok(())
+    }
+
     async fn research(&self, project: &Project, feedback: &str) -> Result<()> {
         let instruction=format!("请针对以下设计目的与参考对象完成有证据的调研。先搜索再抓取重点来源，给出可执行的撰写意见。\n设计目的：{}\n参考对象：{}\n平台：{}\n受众：{}\n最后输出 ResearchReport JSON。来源 ID 必须真实来自工具。",project.purpose,project.reference_text,if project.platform.is_empty(){"未指定"}else{&project.platform},if project.audience.is_empty(){"未指定"}else{&project.audience});
         let result=self.agents.run(Role::Research,project,instruction,feedback).await?;
@@ -104,16 +111,39 @@ impl Workflow {
         let evidence_json=serde_json::to_string(&evidence)?;
         let evidence_text=crate::paths::truncate_utf8(&evidence_json,45000);
         let old=self.bounded_document(project)?;
-        let instruction=format!("依据已确认框架撰写完整 GDD，不做提纲式占位。\n{}\n已登记检索证据（优先使用其 URL，引用格式 [标题](URL)）：{}\n关键参考对象至少提供一张真实参考截图，用 image_search 和 select_image；核心循环至少一张自绘流程图。每张图紧邻解释它的正文，写图号、标题与来源。输出 DocumentDraft JSON，markdown 为完整文档。\n保留仍有效的旧版正文，仅修改受影响内容：{}",project.artifact("framework").unwrap_or(&json!({})),evidence_text,old);
-        let result=self.agents.run(Role::Writer,project,instruction,feedback).await?;
-        self.save(project,"document",result,"interaction",feedback)
+        if old.is_empty() {
+            let instruction=format!("依据已确认框架撰写完整 GDD，不做提纲式占位。\n{}\n已登记检索证据（优先使用其 URL，引用格式 [标题](URL)）：{}\n关键参考对象至少提供一张真实参考截图，用 image_search 和 select_image；核心循环至少一张自绘流程图。每张图紧邻解释它的正文，写图号、标题与来源。输出 DocumentDraft JSON，markdown 为完整文档。",project.artifact("framework").unwrap_or(&json!({})),evidence_text);
+            let result=self.agents.run(Role::Writer,project,instruction,feedback).await?;
+            return self.save(project,"document",result,"interaction",feedback);
+        }
+        // Revision of an existing document: patch mode — output only changed
+        // sections so output size never scales with document length.
+        let headings=extract_headings(&old);
+        let empty_request=json!({});
+        let revision_request=project.artifacts.get("revision_request").unwrap_or(&empty_request);
+        let instruction=format!(
+            "这是对既有 GDD 的修订。只输出 DocumentPatches JSON：patches 数组，每项 {{heading, markdown}}。\nheading 必须逐字取自下方章节清单；markdown 为该章节的完整替换内容（以该标题行开头，到下一同级或更高级标题为止）。只输出需要修改的章节，未受影响章节不要出现；确需新增章节时，heading 使用新标题并把补丁插入位置说明写进 markdown 首行注释。\n修改要求：{}\n受影响章节：{}\n章节清单：{}\n现有全文（仅供理解上下文，禁止整篇输出）：{old}",
+            serde_json::to_string(project.artifacts.get("revision_request").unwrap_or(&empty_request))?,
+            serde_json::to_string(revision_request.get("affected_sections").unwrap_or(&json!([])))?,
+            serde_json::to_string(&headings)?,
+        );
+        let result=self.agents.run_writer_patch(project,instruction,feedback).await?;
+        let plan:crate::domain::DocumentPatches=serde_json::from_value(result.clone())?;
+        let merged=apply_patches(&old,&plan.patches)?;
+        self.ensure_size(&merged)?;
+        self.save(project,"document",json!({"markdown":merged}),"interaction",feedback)
     }
 
     async fn interaction(&self, project: &Project, feedback: &str) -> Result<()> {
         let document=self.bounded_document(project)?;
-        let instruction=format!("审阅以下 GDD，补全交互入口、操作、状态、反馈、异常与空状态；至少为关键界面使用 wireframe 生成一张编号线框图，并用正文解释编号。保留所有原有图片及资源附录占位。输出完整 DocumentDraft JSON。\n{document}");
+        let instruction=format!(
+            "审阅以下 GDD 全文，撰写「交互设计补充」章节：覆盖交互入口、输入方式与平台差异、界面状态（默认/选中/执行中/成功/失败/不可用/空状态）、操作路径、反馈与防误触；至少为最关键的 1–2 个界面使用 wireframe 生成编号线框图，并在正文中解释每个编号。\n原文较长，切勿在输出中复述或改写原文的任何其他内容——只输出你新增的补充章节。\n只输出 InteractionSupplement JSON：markdown 为该章节的完整 Markdown（以 ## 标题开头）。\n全文如下：\n{document}"
+        );
         let result=self.agents.run(Role::Interaction,project,instruction,feedback).await?;
-        self.save(project,"document",result,"resources",feedback)?;
+        let supplement:crate::domain::InteractionSupplement=serde_json::from_value(result.clone())?;
+        let merged=merge_supplement(&document,&supplement.markdown);
+        self.ensure_size(&merged)?;
+        self.save(project,"document",json!({"markdown":merged}),"resources",feedback)?;
         self.repo.save_artifact(&project.id,"interaction",json!({"completed":true}),"")?;
         Ok(())
     }
@@ -151,13 +181,32 @@ impl Workflow {
         for role in [Role::Writer,Role::Interaction,Role::Producer] {
             let findings:Vec<_>=review.findings.iter().filter(|finding|finding.owner==role).collect();
             if findings.is_empty() { continue; }
-            let instruction=format!("仅修复以下审核问题，保留其他已验证内容、真实图片与来源，输出符合角色要求的完整结果。\n问题：{}\n正文：{document}",serde_json::to_string(&findings)?);
-            let result=self.agents.run(role,project,instruction,feedback).await?;
+            let findings_json=serde_json::to_string(&findings)?;
             if role==Role::Producer {
+                let instruction=format!("依据正文和以下审核问题更新资源清单，输出 ResourcePlan JSON。\n问题：{findings_json}\n正文：{document}");
+                let result=self.agents.run(role,project,instruction,feedback).await?;
                 let plan:crate::domain::ResourcePlan=serde_json::from_value(result.clone())?;
                 self.repo.save_artifact(&project.id,"resources",result,"")?;
                 document=format!("{}{}",document.split("\n## 附录：功能与制作资源拆解").next().unwrap_or(&document),resource_markdown(&plan));
-            } else { document=result.get("markdown").and_then(Value::as_str).unwrap_or("").to_string(); }
+            } else if role==Role::Writer {
+                // Patch mode: only output replaced sections, never the whole document.
+                let headings=extract_headings(&document);
+                let instruction=format!(
+                    "仅修复以下审核问题。只输出 DocumentPatches JSON：patches 数组，每项 {{heading, markdown}}；heading 逐字取自下方章节清单，markdown 为该章节完整替换内容。未受影响章节不要输出。\n问题：{findings_json}\n章节清单：{}\n现有全文：{document}",
+                    serde_json::to_string(&headings)?
+                );
+                let result=self.agents.run_writer_patch(project,instruction,feedback).await?;
+                let plan:crate::domain::DocumentPatches=serde_json::from_value(result.clone())?;
+                document=apply_patches(&document,&plan.patches)?;
+            } else {
+                let instruction=format!(
+                    "仅修复以下审核问题，输出 InteractionSupplement JSON：markdown 为更新后的交互补充章节完整 Markdown（## 开头），不要复述原文。\n问题：{findings_json}\n现有全文：{document}"
+                );
+                let result=self.agents.run(role,project,instruction,feedback).await?;
+                let supplement:crate::domain::InteractionSupplement=serde_json::from_value(result.clone())?;
+                document=replace_supplement(&document,&supplement.markdown);
+            }
+            self.ensure_size(&document)?;
         }
         self.repo.save_artifact(&project.id,"document",json!({"markdown":document}),"")?;
         fs::write(project.working_dir()?.join("document.md"),&document)?;
@@ -216,5 +265,144 @@ impl Workflow {
         if content.len()>2*1024*1024 { return Err(AppError::Workflow("正文超过 2 MiB，请先拆分".into())); }
         self.save(&project,"document",json!({"markdown":content}),if project.artifact("document").is_some(){"resources"}else{&project.status},"")?;
         self.repo.event(project_id,"edit","用户手动保存正文；需重新整理资源并审核")
+    }
+}
+
+/// 章节标题清单（1–4 级），供补丁模型逐字引用。
+fn extract_headings(markdown: &str) -> Vec<String> {
+    markdown.lines().filter_map(|line| {
+        let trimmed=line.trim();
+        if !trimmed.starts_with('#') { return None; }
+        let hashes=trimmed.chars().take_while(|&c|c=='#').count();
+        if hashes>4 { return None; }
+        let title=trimmed[hashes..].trim();
+        if title.is_empty() { return None; }
+        Some(title.to_string())
+    }).collect()
+}
+
+/// 在正文中定位章节标题：返回（标题行起点，内容起点，标题级别）。
+fn find_section(markdown: &str, heading: &str) -> Option<(usize,usize,usize)> {
+    let target=heading.trim();
+    let mut offset=0;
+    for line in markdown.split_inclusive('\n') {
+        let trimmed=line.trim_end();
+        if trimmed.starts_with('#') {
+            let hashes=trimmed.chars().take_while(|&c|c=='#').count();
+            let title=trimmed[hashes..].trim();
+            if title==target { return Some((offset,offset+line.len(),hashes)); }
+        }
+        offset+=line.len();
+    }
+    None
+}
+
+/// 从内容起点向后扫描，返回第一个同级或更高级标题的起点；无则到文末。
+fn section_end(markdown: &str, scan_from: usize, level: usize) -> usize {
+    let mut offset=scan_from;
+    for line in markdown[scan_from..].split_inclusive('\n') {
+        let trimmed=line.trim_end();
+        if trimmed.starts_with('#') {
+            let hashes=trimmed.chars().take_while(|&c|c=='#').count();
+            if hashes<=level { return offset; }
+        }
+        offset+=line.len();
+    }
+    markdown.len()
+}
+
+/// 把交互补充章节合并进正文：优先插入到资源附录之前，否则追加到文末。
+fn merge_supplement(document: &str, supplement: &str) -> String {
+    let supplement=supplement.trim();
+    if let Some(idx)=document.find("\n## 附录：功能与制作资源拆解") {
+        format!("{}\n\n{}\n{}", &document[..idx], supplement, &document[idx+1..])
+    } else {
+        format!("{}\n\n{}", document.trim_end(), supplement)
+    }
+}
+
+/// 修订交互补充：若正文已存在同名补充章节则整段替换，否则按合并规则插入。
+fn replace_supplement(document: &str, supplement: &str) -> String {
+    let title=supplement.trim().lines().find_map(|line| {
+        let trimmed=line.trim();
+        trimmed.strip_prefix("## ").map(str::trim)
+    });
+    if let Some(title)=title {
+        if let Some((start,_,level))=find_section(document,title) {
+            let heading_line_len=document[start..].find('\n').map(|i|i+1).unwrap_or(document.len()-start);
+            let end=section_end(document,start+heading_line_len,level);
+            let mut out=String::with_capacity(document.len()+supplement.len());
+            out.push_str(&document[..start]);
+            out.push_str(supplement.trim());
+            out.push('\n');
+            out.push_str(&document[end..]);
+            return out;
+        }
+    }
+    merge_supplement(document,supplement)
+}
+
+/// 应用章节补丁：每个补丁按标题定位并整段替换；找不到标题直接报错，绝不静默丢失。
+fn apply_patches(document: &str, patches: &[crate::domain::DocumentPatch]) -> Result<String> {
+    if patches.is_empty() { return Err(AppError::Workflow("模型未返回任何章节补丁".into())); }
+    let mut md=document.to_string();
+    for patch in patches {
+        let heading=patch.heading.trim();
+        if heading.is_empty() { return Err(AppError::Workflow("补丁缺少章节标题".into())); }
+        if let Some((start,content_start,level))=find_section(&md,heading) {
+            let end=section_end(&md,content_start,level);
+            let mut replacement=patch.markdown.trim().to_string();
+            replacement.push('\n');
+            md.replace_range(start..end,&replacement);
+        } else {
+            return Err(AppError::Workflow(format!("未在正文中找到待修改章节「{}」，未应用任何补丁",heading)));
+        }
+    }
+    Ok(md)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn patches_replace_targeted_sections_only() {
+        let doc="# T\n\n## A\n\nold a\n\n### A1\n\ndeep\n\n## B\n\nold b\n";
+        let patches=vec![crate::domain::DocumentPatch{heading:"A".into(),markdown:"## A\n\nnew a\n".into()}];
+        let out=apply_patches(doc,&patches).unwrap();
+        assert!(out.contains("new a") && out.contains("old b") && out.contains("## B"));
+        assert!(!out.contains("old a") && !out.contains("deep"));
+        assert!(apply_patches(doc,&[]).is_err());
+    }
+
+    #[test]
+    fn unknown_patch_heading_fails_loudly() {
+        let doc="# T\n\n## A\n\nold\n";
+        let patches=vec![crate::domain::DocumentPatch{heading:"不存在".into(),markdown:"x".into()}];
+        assert!(apply_patches(doc,&patches).is_err());
+    }
+
+    #[test]
+    fn supplement_inserts_before_appendix() {
+        let doc="# T\n\nbody\n\n## 附录：功能与制作资源拆解\n\n| x |\n";
+        let out=merge_supplement(doc,"## 交互设计补充\n\nwireframe");
+        assert!(out.find("交互设计补充").unwrap()<out.find("附录：功能").unwrap());
+        assert!(out.ends_with("| x |\n"));
+    }
+
+    #[test]
+    fn replace_supplement_updates_existing_block() {
+        let doc="# T\n\n## 交互设计补充\n\nold ix\n\n## 附录\n\nrows\n";
+        let out=replace_supplement(doc,"## 交互设计补充\n\nnew ix");
+        assert!(out.contains("new ix") && !out.contains("old ix") && out.contains("rows"));
+    }
+
+    #[test]
+    fn heading_extraction_and_section_bounds() {
+        let heads=extract_headings("# T\n## A\n### A1\n#### deep\n");
+        assert_eq!(heads,vec!["T","A","A1","deep"]);
+        let doc="# T\n\n## A\n\na\n\n### A1\n\ndeep\n\n## B\n\nb\n";
+        let (_,content_start,level)=find_section(doc,"A").unwrap();
+        assert_eq!(section_end(doc,content_start,level),doc.find("## B").unwrap());
     }
 }

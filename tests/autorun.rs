@@ -13,9 +13,13 @@ impl AgentExecutor for AutoAgents {
             Role::Architect if project.status=="review" || project.status.starts_with("running:review") || project.status.starts_with("running:revise")=>json!({"approved":true,"findings":[],"summary":"模拟审核通过"}),
             Role::Architect if project.status=="revision_planning" || project.status.starts_with("running:revision_plan")=>json!({"research_needed":false,"reason":"局部修改","affected_sections":["核心循环"],"preserved_sections":[]}),
             Role::Architect=>json!({"title":"测试","summary":"框架","sections":[{"id":"loop","title":"核心循环","purpose":"规则","requirements":["采集"],"visuals":["流程"],"acceptance":["闭环"]}],"boundaries":[]}),
-            Role::Writer|Role::Interaction=>json!({"markdown":"# 测试策划\n\n## 核心循环\n\n玩家采集资源。\n\n## 交互\n\n| 操作 | 反馈 |\n| --- | --- |\n| 采集 | 入包 |\n\n离线模拟正文。"}),
+            Role::Writer=>json!({"markdown":"# 测试策划\n\n## 核心循环\n\n玩家采集资源。\n\n## 交互\n\n| 操作 | 反馈 |\n| --- | --- |\n| 采集 | 入包 |\n\n离线模拟正文。"}),
+            Role::Interaction=>json!({"markdown":"## 交互设计补充\n\n采集不可用时需说明原因（离线模拟补充）。"}),
             Role::Producer=>json!({"features":[{"id":"F-001","name":"采集","specification":"选择资源","source_section":"核心循环","dependencies":"","priority":"P0","acceptance":"资源入包"}],"art":[],"audio":[]}),
         })
+    }
+    async fn run_writer_patch(&self, _project: &Project, _instruction: String, _feedback: &str) -> gdd_harness::Result<Value> {
+        Ok(json!({"patches":[]}))
     }
     async fn annotate(&self, _project: &Project, _path: &str, _title: &str) -> gdd_harness::Result<Vec<Annotation>> { Ok(vec![]) }
 }

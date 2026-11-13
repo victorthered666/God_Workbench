@@ -9,6 +9,7 @@ struct FakeAgents;
 #[async_trait]
 impl AgentExecutor for FakeAgents {
     async fn run(&self, _role: Role, _project: &Project, _instruction: String, _feedback: &str) -> gdd_harness::Result<Value> { unreachable!() }
+    async fn run_writer_patch(&self, _project: &Project, _instruction: String, _feedback: &str) -> gdd_harness::Result<Value> { unreachable!() }
     async fn annotate(&self, _project: &Project, _path: &str, _title: &str) -> gdd_harness::Result<Vec<Annotation>> { Ok(vec![]) }
 }
 

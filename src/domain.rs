@@ -126,6 +126,23 @@ pub struct FrameworkSection {
 pub struct DocumentDraft { pub markdown: String }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct InteractionSupplement {
+    /// 完整的交互设计补充章节 Markdown，以 ## 标题开头；不含原文其他内容。
+    pub markdown: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct DocumentPatch {
+    /// 逐字取自文档章节清单的标题
+    pub heading: String,
+    /// 该章节的完整替换 Markdown（以标题行开头）
+    pub markdown: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct DocumentPatches { pub patches: Vec<DocumentPatch> }
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ImpactPlan {
     pub research_needed: bool,
     pub reason: String,
