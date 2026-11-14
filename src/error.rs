@@ -9,6 +9,8 @@ pub enum AppError {
     Invalid(String),
     #[error("{0}")]
     Agent(String),
+    #[error("模型输出被 max_tokens 截断，未保存不完整产物")]
+    OutputTruncated,
     #[error("{0}")]
     Tool(String),
     #[error("本地数据操作失败")]
@@ -32,6 +34,7 @@ pub type Result<T> = std::result::Result<T, AppError>;
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
+            Self::OutputTruncated => (StatusCode::UNPROCESSABLE_ENTITY, self.to_string()),
             Self::Workflow(message) => (StatusCode::CONFLICT, message.clone()),
             Self::Invalid(message) => (StatusCode::BAD_REQUEST, message.clone()),
             Self::Agent(message) | Self::Tool(message) | Self::Other(message) => (StatusCode::BAD_REQUEST, message.clone()),

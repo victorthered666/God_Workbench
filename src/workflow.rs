@@ -151,20 +151,38 @@ impl Workflow {
     async fn resources(&self, project: &Project, feedback: &str) -> Result<()> {
         let document=self.bounded_document(project)?;
         // 长文档一次性穷举资源会顶爆输出上限；按章节分批提取后合并。
-        let chunks=split_document_chunks(&document,6000);
+        // 单批仍被截断时自适应对半拆分重试，直到每批输出都能装下为止。
+        let mut pending:std::collections::VecDeque<String>=split_document_chunks(&document,6000).into_iter().collect();
         let mut merged=crate::domain::ResourcePlan::default();
-        let total=chunks.len();
-        for (index,chunk) in chunks.iter().enumerate() {
+        let mut batch=0usize;
+        while let Some(chunk)=pending.pop_front() {
+            batch+=1;
+            let chars=chunk.chars().count();
             let instruction=format!(
-                "仅针对以下第 {}/{} 批章节片段提取功能、美术、音效资源，输出 ResourcePlan JSON。\n要求：规格与验收标准各一行以内；同一系统多个子项合并为一条资源；宁缺毋滥，不确定是否属于本项目制作项的不要输出；不得把参考对象中的资源误记为本项目资源。\n片段：\n{chunk}",
-                index+1,total
+                "仅针对以下章节片段（约 {chars} 字）提取功能、美术、音效资源，输出 ResourcePlan JSON。\n要求：规格与验收标准各一行以内；同一系统多个子项合并为一条资源；宁缺毋滥，不确定是否属于本项目制作项的不要输出；不得把参考对象中的资源误记为本项目资源。\n片段：\n{chunk}"
             );
-            let result=self.agents.run(Role::Producer,project,instruction,feedback).await?;
-            let plan:crate::domain::ResourcePlan=serde_json::from_value(result.clone())?;
-            merged.features.extend(plan.features);
-            merged.art.extend(plan.art);
-            merged.audio.extend(plan.audio);
-            self.repo.event(&project.id,"stage",&format!("资源拆解：完成第 {}/{} 批提取",index+1,total))?;
+            self.repo.event(&project.id,"stage",&format!("资源拆解：开始第 {batch} 批提取（约 {chars} 字，剩余 {} 批）",pending.len()))?;
+            match self.agents.run(Role::Producer,project,instruction,feedback).await {
+                Ok(result)=>{
+                    let plan:crate::domain::ResourcePlan=serde_json::from_value(result.clone())?;
+                    merged.features.extend(plan.features);
+                    merged.art.extend(plan.art);
+                    merged.audio.extend(plan.audio);
+                    self.repo.event(&project.id,"stage",&format!("资源拆解：完成第 {batch} 批提取（剩余 {} 批）",pending.len()))?;
+                },
+                Err(AppError::OutputTruncated)=>{
+                    match split_chunk_in_half(&chunk) {
+                        Some((first,second))=>{
+                            pending.push_front(second);
+                            pending.push_front(first);
+                            batch-=1;
+                            self.repo.event(&project.id,"stage","该批内容过密导致输出截断，已对半拆分重试")?;
+                        },
+                        None=>return Err(AppError::OutputTruncated),
+                    }
+                },
+                Err(error)=>return Err(error),
+            }
         }
         dedupe_and_renumber(&mut merged);
         let result=serde_json::to_value(&merged)?;
@@ -379,6 +397,31 @@ fn split_document_chunks(document: &str, max_chars: usize) -> Vec<String> {
     chunks
 }
 
+/// 把被截断的批次沿最近的 ###/#### 边界对半拆开；过短或无法拆分时放弃。
+fn split_chunk_in_half(chunk: &str) -> Option<(String,String)> {
+    if chunk.len()<800 { return None; }
+    let mid=chunk.len()/2;
+    let mut boundary=None;
+    let mut best_distance=usize::MAX;
+    let candidates=chunk.match_indices("\n### ").chain(chunk.match_indices("\n#### ")).map(|(index,_)|index);
+    for index in candidates {
+        let distance=index.abs_diff(mid);
+        if distance<best_distance && index>200 && chunk.len()-index>200 {
+            best_distance=distance; boundary=Some(index+1);
+        }
+    }
+    if boundary.is_none() {
+        for index in chunk.match_indices("\n\n").map(|(index,_)|index) {
+            let distance=index.abs_diff(mid);
+            if distance<best_distance && index>200 && chunk.len()-index>200 {
+                best_distance=distance; boundary=Some(index+2);
+            }
+        }
+    }
+    let index=boundary?;
+    Some((chunk[..index].to_string(),chunk[index..].to_string()))
+}
+
 /// 合并各批提取结果：按（名称+来源章节）去重，再按类别重新编号保证 ID 唯一。
 fn dedupe_and_renumber(plan: &mut crate::domain::ResourcePlan) {
     fn dedupe(items: Vec<crate::domain::ResourceItem>, prefix: &str) -> Vec<crate::domain::ResourceItem> {
@@ -475,6 +518,18 @@ mod tests {
             assert!(chunk.chars().count()<=60,"chunk too large: {}",chunk.chars().count());
         }
         assert_eq!(split_document_chunks("short",6000).len(),1);
+    }
+
+    #[test]
+    fn split_chunk_in_half_finds_nearest_subsection_boundary() {
+        let filler="填充内容以超过最小拆分长度。".repeat(30);
+        let doc=format!("# T\n\n## 一\n\n{filler}\n\n### 一甲\n\n{filler}\n\n## 二\n\n{filler}\n\n### 二甲\n\n{filler}\n");
+        let (first,second)=split_chunk_in_half(&doc).unwrap();
+        assert!(first.contains("一甲") || first.contains("## 一"));
+        assert!(second.contains("二甲") || second.contains("## 二"));
+        assert_eq!(format!("{first}{second}"),doc);
+        // 过短内容直接放弃，交由上层报错
+        assert!(split_chunk_in_half("短文本").is_none());
     }
 
     #[test]

@@ -107,7 +107,7 @@ impl AgentRuntime {
                 }
                 let payload:Value=serde_json::from_slice(&bytes).map_err(|_|AppError::Agent("模型响应不是有效的 Chat Completions 结果".into()))?;
                 let choice=payload.get("choices").and_then(Value::as_array).and_then(|v|v.first()).ok_or_else(||AppError::Agent("模型响应 choices 为空".into()))?;
-                if choice.get("finish_reason").and_then(Value::as_str)==Some("length") { return Err(AppError::Agent("模型输出被 max_tokens 截断，未保存不完整产物".into())); }
+                if choice.get("finish_reason").and_then(Value::as_str)==Some("length") { return Err(AppError::OutputTruncated); }
                 let message=choice.get("message").cloned().unwrap_or(json!({}));
                 messages.push(message.clone());
                 if let Some(calls)=message.get("tool_calls").and_then(Value::as_array).filter(|v|!v.is_empty()) {
