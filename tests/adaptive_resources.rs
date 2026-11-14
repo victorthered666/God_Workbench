@@ -1,27 +1,24 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use async_trait::async_trait;
-use gdd_harness::{agent::runtime::AgentExecutor, config::Config, domain::{Annotation, Project, Role}, repository::Repository, workflow::Workflow};
+use gdd_harness::{agent::runtime::{AgentExecutor, AgentTask}, config::Config, domain::{Annotation, Project, Role}, repository::Repository, workflow::Workflow};
 use serde_json::{json, Value};
 
 /// 首次调用模拟输出截断，之后按片段名返回小规模资源，验证自适应拆分重试。
 struct FlakyProducer { calls: AtomicUsize }
 #[async_trait]
 impl AgentExecutor for FlakyProducer {
-    async fn run(&self, role: Role, _project: &Project, instruction: String, _feedback: &str) -> gdd_harness::Result<Value> {
-        match role {
-            Role::Producer=>{
+    async fn run(&self, task: AgentTask, _project: &Project, instruction: String, _feedback: &str) -> gdd_harness::Result<Value> {
+        match task {
+            AgentTask::Resources=>{
                 if self.calls.fetch_add(1,Ordering::SeqCst)==0 {
                     return Err(gdd_harness::AppError::OutputTruncated);
                 }
                 let name=if instruction.contains("内容甲") {"甲块资源"} else {"乙块资源"};
                 Ok(json!({"features":[{"id":"F-999","name":name,"specification":"模拟规格","source_section":name,"dependencies":"","priority":"P1","acceptance":"可验收"}],"art":[],"audio":[]}))
             },
-            _=>Ok(json!({"summary":"无"})),
+            AgentTask::Research|AgentTask::Framework|AgentTask::RevisionPlan|AgentTask::Review|AgentTask::Document|AgentTask::DocumentPatch|AgentTask::InteractionSupplement=>Ok(json!({"summary":"无"})),
         }
-    }
-    async fn run_writer_patch(&self, _project: &Project, _instruction: String, _feedback: &str) -> gdd_harness::Result<Value> {
-        Ok(json!({"patches":[]}))
     }
     async fn annotate(&self, _project: &Project, _path: &str, _title: &str) -> gdd_harness::Result<Vec<Annotation>> { Ok(vec![]) }
 }

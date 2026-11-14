@@ -1,6 +1,6 @@
 use std::{fs, sync::Arc};
 use serde_json::{json, Value};
-use crate::{agent::runtime::AgentExecutor, config::{Config, MAX_REVIEW_ROUNDS}, domain::{GateRequest, Project, ProjectCreate, RevisionRequest, Role}, export::resources::resource_markdown, paths::safe_name, repository::Repository, AppError, Result};
+use crate::{agent::runtime::{AgentExecutor, AgentTask}, config::{Config, MAX_REVIEW_ROUNDS}, domain::{GateRequest, Project, ProjectCreate, RevisionRequest, Role}, export::resources::resource_markdown, paths::safe_name, repository::Repository, AppError, Result};
 
 #[derive(Clone)]
 pub struct Workflow {
@@ -88,20 +88,20 @@ impl Workflow {
 
     async fn research(&self, project: &Project, feedback: &str) -> Result<()> {
         let instruction=format!("请针对以下设计目的与参考对象完成有证据的调研。先搜索再抓取重点来源，给出可执行的撰写意见。\n设计目的：{}\n参考对象：{}\n平台：{}\n受众：{}\n最后输出 ResearchReport JSON。来源 ID 必须真实来自工具。",project.purpose,project.reference_text,if project.platform.is_empty(){"未指定"}else{&project.platform},if project.audience.is_empty(){"未指定"}else{&project.audience});
-        let result=self.agents.run(Role::Research,project,instruction,feedback).await?;
+        let result=self.agents.run(AgentTask::Research,project,instruction,feedback).await?;
         self.save(project,"research",result,"research_review",feedback)
     }
 
     async fn revision_plan(&self, project: &Project, feedback: &str) -> Result<()> {
         let instruction=format!("用户希望修改已完成的策划文档。根据修改目的、范围、约束和当前文档判断影响范围，不要重写文档。research_needed 表示是否必须重新联网调研；列出受影响与可保留章节。\n修改请求：{}\n当前文档：{}",project.artifacts.get("revision_request").unwrap_or(&json!({})),project.artifact("document").unwrap_or(&json!({})));
-        let result=self.agents.run(Role::Architect,project,instruction,feedback).await?;
+        let result=self.agents.run(AgentTask::RevisionPlan,project,instruction,feedback).await?;
         self.save(project,"revision_plan",result,"revision_review",feedback)
     }
 
     async fn framework(&self, project: &Project, feedback: &str) -> Result<()> {
         if !project.approved("research") { return Err(AppError::Workflow("调研意见尚未由用户确认".into())); }
         let instruction=format!("根据用户已确认的调研意见形成可执行 GDD 框架。\n{}\n修改影响计划（如有）：{}\n章节 id 使用稳定英文短横线格式，输出 Framework JSON。",project.artifact("research").unwrap_or(&json!({})),project.artifact("revision_plan").unwrap_or(&json!({})));
-        let result=self.agents.run(Role::Architect,project,instruction,feedback).await?;
+        let result=self.agents.run(AgentTask::Framework,project,instruction,feedback).await?;
         self.save(project,"framework",result,"framework_review",feedback)
     }
 
@@ -113,7 +113,7 @@ impl Workflow {
         let old=self.bounded_document(project)?;
         if old.is_empty() {
             let instruction=format!("依据已确认框架撰写完整 GDD，不做提纲式占位。\n{}\n已登记检索证据（优先使用其 URL，引用格式 [标题](URL)）：{}\n关键参考对象至少提供一张真实参考截图，用 image_search 和 select_image；核心循环至少一张自绘流程图。每张图紧邻解释它的正文，写图号、标题与来源。输出 DocumentDraft JSON，markdown 为完整文档。",project.artifact("framework").unwrap_or(&json!({})),evidence_text);
-            let result=self.agents.run(Role::Writer,project,instruction,feedback).await?;
+            let result=self.agents.run(AgentTask::Document,project,instruction,feedback).await?;
             return self.save(project,"document",result,"interaction",feedback);
         }
         // Revision of an existing document: patch mode — output only changed
@@ -127,7 +127,7 @@ impl Workflow {
             serde_json::to_string(revision_request.get("affected_sections").unwrap_or(&json!([])))?,
             serde_json::to_string(&headings)?,
         );
-        let result=self.agents.run_writer_patch(project,instruction,feedback).await?;
+        let result=self.agents.run(AgentTask::DocumentPatch,project,instruction,feedback).await?;
         let plan:crate::domain::DocumentPatches=serde_json::from_value(result.clone())?;
         let merged=apply_patches(&old,&plan.patches)?;
         self.ensure_size(&merged)?;
@@ -139,7 +139,7 @@ impl Workflow {
         let instruction=format!(
             "审阅以下 GDD 全文，撰写「交互设计补充」章节：覆盖交互入口、输入方式与平台差异、界面状态（默认/选中/执行中/成功/失败/不可用/空状态）、操作路径、反馈与防误触；至少为最关键的 1–2 个界面使用 wireframe 生成编号线框图，并在正文中解释每个编号。\n原文较长，切勿在输出中复述或改写原文的任何其他内容——只输出你新增的补充章节。\n只输出 InteractionSupplement JSON：markdown 为该章节的完整 Markdown（以 ## 标题开头）。\n全文如下：\n{document}"
         );
-        let result=self.agents.run(Role::Interaction,project,instruction,feedback).await?;
+        let result=self.agents.run(AgentTask::InteractionSupplement,project,instruction,feedback).await?;
         let supplement:crate::domain::InteractionSupplement=serde_json::from_value(result.clone())?;
         let merged=merge_supplement(&document,&supplement.markdown);
         self.ensure_size(&merged)?;
@@ -159,10 +159,10 @@ impl Workflow {
             batch+=1;
             let chars=chunk.chars().count();
             let instruction=format!(
-                "仅针对以下章节片段（约 {chars} 字）提取功能、美术、音效资源，输出 ResourcePlan JSON。\n要求：规格与验收标准各一行以内；同一系统多个子项合并为一条资源；宁缺毋滥，不确定是否属于本项目制作项的不要输出；不得把参考对象中的资源误记为本项目资源。\n片段：\n{chunk}"
+                "仅针对以下章节片段（约 {chars} 字）提取功能、美术、音效资源，输出 ResourcePlan JSON。\n注意：本文档所描述的玩法机制、规则、数值、AI 行为、输入方案与界面规格本身就是本项目的功能点，必须提取；《巫师3》《黑神话：悟空》等既有游戏才是参考对象，其原版内容不得提取。\n要求：规格与验收标准各一行以内；同一系统多个子项合并为一条资源；宁缺毋滥；\n片段：\n{chunk}"
             );
             self.repo.event(&project.id,"stage",&format!("资源拆解：开始第 {batch} 批提取（约 {chars} 字，剩余 {} 批）",pending.len()))?;
-            match self.agents.run(Role::Producer,project,instruction,feedback).await {
+            match self.agents.run(AgentTask::Resources,project,instruction,feedback).await {
                 Ok(result)=>{
                     let plan:crate::domain::ResourcePlan=serde_json::from_value(result.clone())?;
                     merged.features.extend(plan.features);
@@ -196,7 +196,7 @@ impl Workflow {
         let evidence_json=serde_json::to_string(&self.repo.evidence_list(&project.id,100)?)?;
         let evidence=crate::paths::truncate_utf8(&evidence_json,20000);
         let instruction=format!("独立审核完整 GDD。检查目标一致性、框架覆盖、规则闭环、交互状态、图文引用、来源可追溯与资源清单。只报告有正文证据的问题；若可通过，approved=true 且 findings 为空。输出 Review JSON。\n已确认框架：{}\n文档：{}\n证据索引：{}",project.artifact("framework").unwrap_or(&json!({})),document,evidence);
-        let result=self.agents.run(Role::Architect,project,instruction,feedback).await?;
+        let result=self.agents.run(AgentTask::Review,project,instruction,feedback).await?;
         let review:crate::domain::Review=serde_json::from_value(result.clone())?;
         if !review.approved && review.findings.is_empty() { return Err(AppError::Workflow("审核拒绝但未给出可修订问题，未自动通过".into())); }
         self.save(project,"review",result,"review",feedback)?;
@@ -208,8 +208,13 @@ impl Workflow {
     async fn revise(&self, project: &Project, feedback: &str) -> Result<()> {
         let review:crate::domain::Review=serde_json::from_value(project.artifact("review").cloned().unwrap_or(json!({})))?;
         if review.approved { return Err(AppError::Workflow("审核已通过，不需要自动修订".into())); }
-        if project.review_round>=MAX_REVIEW_ROUNDS { return Err(AppError::Workflow("自动修订已达 3 轮，请人工处理".into())); }
-        if review.findings.iter().any(|f|matches!(f.owner,Role::Research|Role::Architect)) { return Err(AppError::Workflow("问题涉及调研或架构，请人工调整已确认意见/框架，不绕过人工门禁自动改写".into())); }
+        let acknowledged=project.artifacts.get("review_acknowledged").and_then(Value::as_bool).unwrap_or(false);
+        // 人工知悉架构类问题后，允许再进行一轮针对性自动修订（每次知悉 = 一次明确授权）。
+        if !acknowledged && project.review_round>=MAX_REVIEW_ROUNDS { return Err(AppError::Workflow("自动修订已达 3 轮，请人工处理".into())); }
+        let architecture_findings=review.findings.iter().any(|f|matches!(f.owner,Role::Research|Role::Architect));
+        if architecture_findings && !acknowledged {
+            return Err(AppError::Workflow("问题涉及调研或架构，请人工调整已确认意见/框架；若决定带病继续，可点击「架构类问题已人工知悉」跳过此类问题修订其余项".into()));
+        }
         let mut document=self.bounded_document(project)?;
         for role in [Role::Writer,Role::Interaction,Role::Producer] {
             let findings:Vec<_>=review.findings.iter().filter(|finding|finding.owner==role).collect();
@@ -217,7 +222,7 @@ impl Workflow {
             let findings_json=serde_json::to_string(&findings)?;
             if role==Role::Producer {
                 let instruction=format!("依据正文和以下审核问题更新资源清单，输出 ResourcePlan JSON。\n问题：{findings_json}\n正文：{document}");
-                let result=self.agents.run(role,project,instruction,feedback).await?;
+                let result=self.agents.run(AgentTask::Resources,project,instruction,feedback).await?;
                 let plan:crate::domain::ResourcePlan=serde_json::from_value(result.clone())?;
                 self.repo.save_artifact(&project.id,"resources",result,"")?;
                 document=format!("{}{}",document.split("\n## 附录：功能与制作资源拆解").next().unwrap_or(&document),resource_markdown(&plan));
@@ -228,14 +233,14 @@ impl Workflow {
                     "仅修复以下审核问题。只输出 DocumentPatches JSON：patches 数组，每项 {{heading, markdown}}；heading 逐字取自下方章节清单，markdown 为该章节完整替换内容。未受影响章节不要输出。\n问题：{findings_json}\n章节清单：{}\n现有全文：{document}",
                     serde_json::to_string(&headings)?
                 );
-                let result=self.agents.run_writer_patch(project,instruction,feedback).await?;
+                let result=self.agents.run(AgentTask::DocumentPatch,project,instruction,feedback).await?;
                 let plan:crate::domain::DocumentPatches=serde_json::from_value(result.clone())?;
                 document=apply_patches(&document,&plan.patches)?;
             } else {
                 let instruction=format!(
                     "仅修复以下审核问题，输出 InteractionSupplement JSON：markdown 为更新后的交互补充章节完整 Markdown（## 开头），不要复述原文。\n问题：{findings_json}\n现有全文：{document}"
                 );
-                let result=self.agents.run(role,project,instruction,feedback).await?;
+                let result=self.agents.run(AgentTask::InteractionSupplement,project,instruction,feedback).await?;
                 let supplement:crate::domain::InteractionSupplement=serde_json::from_value(result.clone())?;
                 document=replace_supplement(&document,&supplement.markdown);
             }
@@ -286,6 +291,7 @@ impl Workflow {
         for stage in ["research","framework","document","interaction","resources","review","revision_plan"] {
             if let Some(artifact)=artifacts.get_mut(stage) { artifact["approved"]=json!(false); }
         }
+        artifacts["review_acknowledged"]=json!(false);
         self.repo.update(project_id,Some("revision_planning"),Some(artifacts),Some(None),Some(project.revision+1),Some(0))?;
         self.repo.save_artifact(project_id,"revision_request",serde_json::to_value(request)?,"")?;
         Ok(())

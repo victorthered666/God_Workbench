@@ -136,13 +136,18 @@ function renderArtifact() {
     html += `<div class="gate-form"><label for="gate-feedback">补充或修改意见</label><textarea id="gate-feedback" placeholder="写下需要补充、调整或删除的内容；Agent 将继续分析，直至你确认。"></textarea><div class="gate-actions"><button class="secondary" id="manual-gate">直接编辑 JSON</button><button class="secondary" id="send-feedback">提交反馈并重做</button><button class="primary" id="approve-gate">确认并进入下一阶段 →</button></div></div>`;
   }
   if (key === 'review' && !content.approved) {
-    html += `<div class="gate-actions"><button class="primary" id="retry-review">${p.review_round >= 3 ? '审核未通过 · 已达 3 轮' : '按审核意见修订并复审'}</button></div>`;
+    const hasArch = (content.findings || []).some((f) => f.owner === 'research' || f.owner === 'architect');
+    const ackButton = hasArch ? `<button class="secondary" id="ack-review">架构类问题已人工知悉，继续修订其余问题</button>` : '';
+    const retryLabel = p.review_round >= 3 && !hasArch ? '审核未通过 · 已达 3 轮' : '按审核意见修订并复审';
+    const retryDisabled = p.review_round >= 3 && !hasArch ? 'disabled' : '';
+    html += `<div class="gate-actions">${ackButton}<button class="primary" id="retry-review" ${retryDisabled}>${retryLabel}</button></div>`;
   }
   $('#tab-deliverable').innerHTML = html;
   if ($('#approve-gate')) $('#approve-gate').onclick = () => action(`/api/projects/${p.id}/stages/${key}/approve`, '已确认，正在进入下一阶段');
   if ($('#send-feedback')) $('#send-feedback').onclick = () => { const feedback = $('#gate-feedback').value.trim(); if (!feedback) return toast('请先填写反馈'); action(`/api/projects/${p.id}/stages/${key}/feedback`, '正在按反馈重做', { feedback }); };
   if ($('#manual-gate')) $('#manual-gate').onclick = () => editGate(key, content);
   if ($('#retry-review')) $('#retry-review').onclick = () => action(`/api/projects/${p.id}/run/revise`, '正在分派审核问题并修订');
+  if ($('#ack-review')) $('#ack-review').onclick = () => action(`/api/projects/${p.id}/review/acknowledge`, '已记录人工知悉；正在修订其余问题');
 }
 function researchHtml(data) {
   return `<div class="artifact-section"><h3>方向判断</h3><p>${esc(data.summary)}</p></div><h3>参考对象分析</h3>${(data.findings || []).map((f) => `<div class="finding"><strong>${esc(f.topic)}</strong><small> · ${esc(f.confidence)} · 证据 ${(f.evidence_ids || []).map(esc).join(', ') || '无'}</small><p>${esc(f.observation)}</p><p><b>设计启示：</b>${esc(f.implication)}</p></div>`).join('')}<div class="artifact-section"><h3>具体撰写意见</h3><ul>${(data.writing_advice || []).map((x) => `<li>${esc(x)}</li>`).join('')}</ul></div><div class="artifact-section"><h3>设计建议</h3><ul>${(data.recommendations || []).map((x) => `<li>${esc(x)}</li>`).join('')}</ul></div>${(data.limitations || []).length ? `<div class="notice"><b>证据边界：</b>${data.limitations.map(esc).join('；')}</div>` : ''}`;

@@ -1,25 +1,22 @@
 use std::sync::Arc;
 use async_trait::async_trait;
-use gdd_harness::{agent::runtime::AgentExecutor, config::Config, domain::{Annotation, Project, Role}, repository::Repository, runner::Runner, workflow::Workflow};
+use gdd_harness::{agent::runtime::{AgentExecutor, AgentTask}, config::Config, domain::{Annotation, Project, Role}, repository::Repository, runner::Runner, workflow::Workflow};
 use serde_json::{json, Value};
 use std::time::Duration;
 
 struct AutoAgents;
 #[async_trait]
 impl AgentExecutor for AutoAgents {
-    async fn run(&self, role: Role, project: &Project, _instruction: String, _feedback: &str) -> gdd_harness::Result<Value> {
-        Ok(match role {
-            Role::Research=>json!({"summary":"模拟调研","findings":[{"topic":"循环","observation":"模拟证据","implication":"明确循环","evidence_ids":[],"confidence":"事实"}],"recommendations":["先做循环"],"writing_advice":["明确消耗"],"limitations":[]}),
-            Role::Architect if project.status=="review" || project.status.starts_with("running:review") || project.status.starts_with("running:revise")=>json!({"approved":true,"findings":[],"summary":"模拟审核通过"}),
-            Role::Architect if project.status=="revision_planning" || project.status.starts_with("running:revision_plan")=>json!({"research_needed":false,"reason":"局部修改","affected_sections":["核心循环"],"preserved_sections":[]}),
-            Role::Architect=>json!({"title":"测试","summary":"框架","sections":[{"id":"loop","title":"核心循环","purpose":"规则","requirements":["采集"],"visuals":["流程"],"acceptance":["闭环"]}],"boundaries":[]}),
-            Role::Writer=>json!({"markdown":"# 测试策划\n\n## 核心循环\n\n玩家采集资源。\n\n## 交互\n\n| 操作 | 反馈 |\n| --- | --- |\n| 采集 | 入包 |\n\n离线模拟正文。"}),
-            Role::Interaction=>json!({"markdown":"## 交互设计补充\n\n采集不可用时需说明原因（离线模拟补充）。"}),
-            Role::Producer=>json!({"features":[{"id":"F-001","name":"采集","specification":"选择资源","source_section":"核心循环","dependencies":"","priority":"P0","acceptance":"资源入包"}],"art":[],"audio":[]}),
+    async fn run(&self, task: AgentTask, project: &Project, _instruction: String, _feedback: &str) -> gdd_harness::Result<Value> {
+        Ok(match task {
+            AgentTask::Research=>json!({"summary":"模拟调研","findings":[{"topic":"循环","observation":"模拟证据","implication":"明确循环","evidence_ids":[],"confidence":"事实"}],"recommendations":["先做循环"],"writing_advice":["明确消耗"],"limitations":[]}),
+            AgentTask::Review=>json!({"approved":true,"findings":[],"summary":"模拟审核通过"}),
+            AgentTask::RevisionPlan=>json!({"research_needed":false,"reason":"局部修改","affected_sections":["核心循环"],"preserved_sections":[]}),
+            AgentTask::Framework=>json!({"title":"测试","summary":"框架","sections":[{"id":"loop","title":"核心循环","purpose":"规则","requirements":["采集"],"visuals":["流程"],"acceptance":["闭环"]}],"boundaries":[]}),
+            AgentTask::Document=>json!({"markdown":"# 测试策划\n\n## 核心循环\n\n玩家采集资源。\n\n## 交互\n\n| 操作 | 反馈 |\n| --- | --- |\n| 采集 | 入包 |\n\n离线模拟正文。"}),
+            AgentTask::InteractionSupplement=>json!({"markdown":"## 交互设计补充\n\n采集不可用时需说明原因（离线模拟补充）。"}),
+            AgentTask::DocumentPatch|AgentTask::Resources=>json!({"features":[{"id":"F-001","name":"采集","specification":"选择资源","source_section":"核心循环","dependencies":"","priority":"P0","acceptance":"资源入包"}],"art":[],"audio":[]}),
         })
-    }
-    async fn run_writer_patch(&self, _project: &Project, _instruction: String, _feedback: &str) -> gdd_harness::Result<Value> {
-        Ok(json!({"patches":[]}))
     }
     async fn annotate(&self, _project: &Project, _path: &str, _title: &str) -> gdd_harness::Result<Vec<Annotation>> { Ok(vec![]) }
 }

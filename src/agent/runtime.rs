@@ -6,11 +6,35 @@ use sha2::{Digest, Sha256};
 use crate::{config::{MAX_MESSAGE_BYTES, MAX_TOOL_RESULT_BYTES}, domain::{AgentResult, AgentSettings, Annotations, Project, Role}, media, paths::truncate_utf8, repository::Repository, secrets::SecretStore, tools::{deepseek::DeepSeek, doubao::Doubao, http::ToolHttp}, AppError, Result};
 use super::{session, vision};
 
+/// 显式声明本次调用的产出类型；绝不从 project.status 推断，
+/// 否则中断恢复等场景会把审核输出误当框架校验。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentTask {
+    Research,
+    Framework,
+    RevisionPlan,
+    Review,
+    Document,
+    DocumentPatch,
+    InteractionSupplement,
+    Resources,
+}
+
+impl AgentTask {
+    pub fn role(&self) -> Role {
+        match self {
+            Self::Research => Role::Research,
+            Self::Framework | Self::RevisionPlan | Self::Review => Role::Architect,
+            Self::Document | Self::DocumentPatch => Role::Writer,
+            Self::InteractionSupplement => Role::Interaction,
+            Self::Resources => Role::Producer,
+        }
+    }
+}
+
 #[async_trait]
 pub trait AgentExecutor: Send + Sync {
-    async fn run(&self, role: Role, project: &Project, instruction: String, feedback: &str) -> Result<Value>;
-    /// 对既有文档的增量修订：只输出需要替换的章节补丁，避免整篇复述导致输出截断。
-    async fn run_writer_patch(&self, project: &Project, instruction: String, feedback: &str) -> Result<Value>;
+    async fn run(&self, task: AgentTask, project: &Project, instruction: String, feedback: &str) -> Result<Value>;
     async fn annotate(&self, project: &Project, path: &str, title: &str) -> Result<Vec<crate::domain::Annotation>>;
 }
 
@@ -145,20 +169,18 @@ impl AgentRuntime {
 
 #[async_trait]
 impl AgentExecutor for AgentRuntime {
-    async fn run(&self, role: Role, project: &Project, instruction: String, feedback: &str) -> Result<Value> {
-        match role {
-            Role::Research => Ok(serde_json::to_value(self.execute::<crate::domain::ResearchReport>(role,project,instruction,feedback,vec![]).await?)?),
-            Role::Architect if project.status=="review" || project.status.starts_with("running:review") || project.status.starts_with("running:revise") => Ok(serde_json::to_value(self.execute::<crate::domain::Review>(role,project,instruction,feedback,vec![]).await?)?),
-            Role::Architect if project.status=="revision_planning" || project.status.starts_with("running:revision_plan") => Ok(serde_json::to_value(self.execute::<crate::domain::ImpactPlan>(role,project,instruction,feedback,vec![]).await?)?),
-            Role::Architect => Ok(serde_json::to_value(self.execute::<crate::domain::Framework>(role,project,instruction,feedback,vec![]).await?)?),
-            Role::Writer => Ok(serde_json::to_value(self.execute::<crate::domain::DocumentDraft>(role,project,instruction,feedback,vec![]).await?)?),
-            Role::Interaction => Ok(serde_json::to_value(self.execute::<crate::domain::InteractionSupplement>(role,project,instruction,feedback,vec![]).await?)?),
-            Role::Producer => Ok(serde_json::to_value(self.execute::<crate::domain::ResourcePlan>(role,project,instruction,feedback,vec![]).await?)?),
+    async fn run(&self, task: AgentTask, project: &Project, instruction: String, feedback: &str) -> Result<Value> {
+        let role=task.role();
+        match task {
+            AgentTask::Research => Ok(serde_json::to_value(self.execute::<crate::domain::ResearchReport>(role,project,instruction,feedback,vec![]).await?)?),
+            AgentTask::Framework => Ok(serde_json::to_value(self.execute::<crate::domain::Framework>(role,project,instruction,feedback,vec![]).await?)?),
+            AgentTask::RevisionPlan => Ok(serde_json::to_value(self.execute::<crate::domain::ImpactPlan>(role,project,instruction,feedback,vec![]).await?)?),
+            AgentTask::Review => Ok(serde_json::to_value(self.execute::<crate::domain::Review>(role,project,instruction,feedback,vec![]).await?)?),
+            AgentTask::Document => Ok(serde_json::to_value(self.execute::<crate::domain::DocumentDraft>(role,project,instruction,feedback,vec![]).await?)?),
+            AgentTask::DocumentPatch => Ok(serde_json::to_value(self.execute::<crate::domain::DocumentPatches>(role,project,instruction,feedback,vec![]).await?)?),
+            AgentTask::InteractionSupplement => Ok(serde_json::to_value(self.execute::<crate::domain::InteractionSupplement>(role,project,instruction,feedback,vec![]).await?)?),
+            AgentTask::Resources => Ok(serde_json::to_value(self.execute::<crate::domain::ResourcePlan>(role,project,instruction,feedback,vec![]).await?)?),
         }
-    }
-
-    async fn run_writer_patch(&self, project: &Project, instruction: String, feedback: &str) -> Result<Value> {
-        Ok(serde_json::to_value(self.execute::<crate::domain::DocumentPatches>(Role::Writer,project,instruction,feedback,vec![]).await?)?)
     }
 
     async fn annotate(&self, project: &Project, path: &str, title: &str) -> Result<Vec<crate::domain::Annotation>> {

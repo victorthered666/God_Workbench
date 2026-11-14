@@ -1,15 +1,14 @@
 use std::sync::Arc;
 use async_trait::async_trait;
 use axum::{body::Body, http::{Request, StatusCode}};
-use gdd_harness::{agent::runtime::{AgentExecutor, AgentRuntime}, config::Config, domain::{Annotation, Project, ProjectCreate, Role}, http::routes, repository::Repository, runner::Runner, secrets::SecretStore, workflow::Workflow};
+use gdd_harness::{agent::runtime::{AgentExecutor, AgentRuntime, AgentTask}, config::Config, domain::{Annotation, Project, ProjectCreate, Role}, http::routes, repository::Repository, runner::Runner, secrets::SecretStore, workflow::Workflow};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
 struct FakeAgents;
 #[async_trait]
 impl AgentExecutor for FakeAgents {
-    async fn run(&self, _role: Role, _project: &Project, _instruction: String, _feedback: &str) -> gdd_harness::Result<Value> { unreachable!() }
-    async fn run_writer_patch(&self, _project: &Project, _instruction: String, _feedback: &str) -> gdd_harness::Result<Value> { unreachable!() }
+    async fn run(&self, _task: AgentTask, _project: &Project, _instruction: String, _feedback: &str) -> gdd_harness::Result<Value> { unreachable!() }
     async fn annotate(&self, _project: &Project, _path: &str, _title: &str) -> gdd_harness::Result<Vec<Annotation>> { Ok(vec![]) }
 }
 

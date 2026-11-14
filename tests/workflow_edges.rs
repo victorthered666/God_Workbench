@@ -1,23 +1,23 @@
 use std::sync::Arc;
 use async_trait::async_trait;
-use gdd_harness::{agent::runtime::AgentExecutor, config::Config, domain::{Annotation, Project, Role}, repository::Repository, workflow::Workflow};
+use gdd_harness::{agent::runtime::{AgentExecutor, AgentTask}, config::Config, domain::{Annotation, Project, Role}, repository::Repository, workflow::Workflow};
 use serde_json::{json, Value};
 
 struct RejectingAgents;
 #[async_trait]
 impl AgentExecutor for RejectingAgents {
-    async fn run(&self, role: Role, project: &Project, _instruction: String, _feedback: &str) -> gdd_harness::Result<Value> {
-        Ok(match role {
-            Role::Architect if project.status=="review" || project.status.starts_with("running:review") || project.status.starts_with("running:revise")=>json!({"approved":false,"findings":[{"section":"核心循环","problem":"缺少出口","severity":"high","owner":"writer","recommendation":"补充"}],"summary":"不通过"}),
-            Role::Architect=>json!({"title":"框架","summary":"框架","sections":[{"id":"loop","title":"核心循环","purpose":"循环","requirements":["采集"],"visuals":[],"acceptance":[]}],"boundaries":[]}),
-            Role::Writer=>json!({"markdown":"# 离线模拟\n\n正文"}),
-            Role::Interaction=>json!({"markdown":"## 交互设计补充\n\n修订后的交互说明"}),
-            Role::Research=>json!({"summary":"调研","findings":[],"recommendations":[],"writing_advice":[],"limitations":[]}),
-            Role::Producer=>json!({"features":[],"art":[],"audio":[]}),
+    async fn run(&self, task: AgentTask, project: &Project, _instruction: String, _feedback: &str) -> gdd_harness::Result<Value> {
+        Ok(match task {
+            AgentTask::DocumentPatch=>json!({"patches":[{"heading":"模拟正文","markdown":"# 模拟正文
+
+修订后的正文"}]}),
+            AgentTask::Review=>json!({"approved":false,"findings":[{"section":"核心循环","problem":"缺少出口","severity":"high","owner":"writer","recommendation":"补充"}],"summary":"不通过"}),
+            AgentTask::Framework=>json!({"title":"框架","summary":"框架","sections":[{"id":"loop","title":"核心循环","purpose":"循环","requirements":["采集"],"visuals":[],"acceptance":[]}],"boundaries":[]}),
+            AgentTask::Document=>json!({"markdown":"# 离线模拟\n\n正文"}),
+            AgentTask::InteractionSupplement=>json!({"markdown":"## 交互设计补充\n\n修订后的交互说明"}),
+            AgentTask::RevisionPlan|AgentTask::Research=>json!({"summary":"调研","findings":[],"recommendations":[],"writing_advice":[],"limitations":[]}),
+            AgentTask::Resources=>json!({"features":[],"art":[],"audio":[]}),
         })
-    }
-    async fn run_writer_patch(&self, _project: &Project, _instruction: String, _feedback: &str) -> gdd_harness::Result<Value> {
-        Ok(json!({"patches":[{"heading":"模拟正文","markdown":"# 模拟正文\n\n修订后的正文"}]}))
     }
     async fn annotate(&self, _project: &Project, _path: &str, _title: &str) -> gdd_harness::Result<Vec<Annotation>> { Ok(vec![]) }
 }

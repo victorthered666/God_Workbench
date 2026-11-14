@@ -29,6 +29,7 @@ pub fn app(repo: Repository, secrets: SecretStore, workflow: Workflow, runner: R
         .route("/api/projects/{id}/cancel",post(cancel))
         .route("/api/projects/{id}/revision",post(revision))
         .route("/api/projects/{id}/autorun",put(autorun))
+        .route("/api/projects/{id}/review/acknowledge",post(acknowledge_review))
         .route("/api/projects/{id}/document",put(edit_document))
         .route("/api/projects/{id}/preview",get(preview))
         .route("/api/projects/{id}/asset",get(asset))
@@ -100,6 +101,22 @@ async fn autorun(State(state): State<AppState>, Path(id): Path<String>, Json(bod
     let enabled=body.get("enabled").and_then(Value::as_bool).ok_or_else(||AppError::Invalid("enabled 必须为布尔值".into()))?;
     state.repo.set_setting(&format!("autorun:{id}"),json!(enabled))?;
     Ok(Json(json!({"status":"saved","autorun":enabled})))
+}
+
+async fn acknowledge_review(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>> {
+    let project=state.repo.require(&id)?;
+    if project.running() { return Err(AppError::Workflow("任务运行时不能确认".into())); }
+    let review:crate::domain::Review=serde_json::from_value(project.artifact("review").cloned().ok_or_else(||AppError::Workflow("尚无审核产物".into()))?)?;
+    if review.approved { return Err(AppError::Workflow("审核已通过".into())); }
+    if !review.findings.iter().any(|f|matches!(f.owner,Role::Research|Role::Architect)) {
+        return Err(AppError::Workflow("当前没有需要人工知悉的架构类问题".into()));
+    }
+    let mut artifacts=project.artifacts.clone();
+    artifacts["review_acknowledged"]=json!(true);
+    state.repo.update(&id,Some("review"),Some(artifacts),Some(None),None,None)?;
+    state.repo.event(&id,"gate","用户人工知悉架构类审核问题；继续修订其余问题")?;
+    state.runner.start(id,"revise".into(),String::new())?;
+    Ok(Json(json!({"status":"acknowledged"})))
 }
 
 async fn revision(State(state): State<AppState>, Path(id): Path<String>, Json(request): Json<RevisionRequest>) -> Result<Json<Value>> {
