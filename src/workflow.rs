@@ -150,12 +150,27 @@ impl Workflow {
 
     async fn resources(&self, project: &Project, feedback: &str) -> Result<()> {
         let document=self.bounded_document(project)?;
-        let instruction=format!("依据以下实际正文，提取全部功能、美术、音效资源，输出 ResourcePlan JSON。不得把参考对象中的资源误记为本项目资源。\n{document}");
-        let result=self.agents.run(Role::Producer,project,instruction,feedback).await?;
-        let plan:crate::domain::ResourcePlan=serde_json::from_value(result.clone())?;
+        // 长文档一次性穷举资源会顶爆输出上限；按章节分批提取后合并。
+        let chunks=split_document_chunks(&document,6000);
+        let mut merged=crate::domain::ResourcePlan::default();
+        let total=chunks.len();
+        for (index,chunk) in chunks.iter().enumerate() {
+            let instruction=format!(
+                "仅针对以下第 {}/{} 批章节片段提取功能、美术、音效资源，输出 ResourcePlan JSON。\n要求：规格与验收标准各一行以内；同一系统多个子项合并为一条资源；宁缺毋滥，不确定是否属于本项目制作项的不要输出；不得把参考对象中的资源误记为本项目资源。\n片段：\n{chunk}",
+                index+1,total
+            );
+            let result=self.agents.run(Role::Producer,project,instruction,feedback).await?;
+            let plan:crate::domain::ResourcePlan=serde_json::from_value(result.clone())?;
+            merged.features.extend(plan.features);
+            merged.art.extend(plan.art);
+            merged.audio.extend(plan.audio);
+            self.repo.event(&project.id,"stage",&format!("资源拆解：完成第 {}/{} 批提取",index+1,total))?;
+        }
+        dedupe_and_renumber(&mut merged);
+        let result=serde_json::to_value(&merged)?;
         let base=document.split("\n## 附录：功能与制作资源拆解").next().unwrap_or(&document);
         self.repo.save_artifact(&project.id,"resources",result,"")?;
-        self.save(project,"document",json!({"markdown":format!("{base}{}",resource_markdown(&plan))}),"review",feedback)
+        self.save(project,"document",json!({"markdown":format!("{base}{}",resource_markdown(&merged))}),"review",feedback)
     }
 
     async fn review(&self, project: &Project, feedback: &str) -> Result<()> {
@@ -342,6 +357,47 @@ fn replace_supplement(document: &str, supplement: &str) -> String {
     merge_supplement(document,supplement)
 }
 
+/// 按二级章节把正文切成片段（前言并入第一批），再贪心合并至不超过 max_chars。
+fn split_document_chunks(document: &str, max_chars: usize) -> Vec<String> {
+    let mut sections:Vec<String>=Vec::new();
+    for line in document.split_inclusive('\n') {
+        if sections.is_empty() || line.starts_with("## ") {
+            sections.push(line.to_string());
+        } else if let Some(last)=sections.last_mut() {
+            last.push_str(line);
+        }
+    }
+    if sections.is_empty() { sections.push(document.to_string()); }
+    let mut chunks:Vec<String>=Vec::new();
+    for section in &sections {
+        match chunks.last_mut() {
+            Some(last) if last.chars().count()+section.chars().count()<=max_chars => last.push_str(section),
+            _=>chunks.push(section.clone()),
+        }
+    }
+    if chunks.is_empty() { chunks.push(document.to_string()); }
+    chunks
+}
+
+/// 合并各批提取结果：按（名称+来源章节）去重，再按类别重新编号保证 ID 唯一。
+fn dedupe_and_renumber(plan: &mut crate::domain::ResourcePlan) {
+    fn dedupe(items: Vec<crate::domain::ResourceItem>, prefix: &str) -> Vec<crate::domain::ResourceItem> {
+        let mut seen=std::collections::HashSet::new();
+        let mut result=Vec::new();
+        for mut item in items {
+            let key=(item.name.trim().to_string(),item.source_section.trim().to_string());
+            if !seen.insert(key) { continue; }
+            item.id=String::new();
+            result.push(item);
+        }
+        for (index,item) in result.iter_mut().enumerate() { item.id=format!("{prefix}-{:03}",index+1); }
+        result
+    }
+    plan.features=dedupe(std::mem::take(&mut plan.features),"F");
+    plan.art=dedupe(std::mem::take(&mut plan.art),"A");
+    plan.audio=dedupe(std::mem::take(&mut plan.audio),"S");
+}
+
 /// 应用章节补丁：每个补丁按标题定位并整段替换；找不到标题直接报错，绝不静默丢失。
 fn apply_patches(document: &str, patches: &[crate::domain::DocumentPatch]) -> Result<String> {
     if patches.is_empty() { return Err(AppError::Workflow("模型未返回任何章节补丁".into())); }
@@ -404,5 +460,34 @@ mod tests {
         let doc="# T\n\n## A\n\na\n\n### A1\n\ndeep\n\n## B\n\nb\n";
         let (_,content_start,level)=find_section(doc,"A").unwrap();
         assert_eq!(section_end(doc,content_start,level),doc.find("## B").unwrap());
+    }
+
+    #[test]
+    fn chunking_groups_small_sections_and_respects_limit() {
+        let doc="# 标题\n\n前言。\n\n## 一\n\n内容一。\n\n## 二\n\n内容二。\n\n## 三\n\n内容三比较长一些。\n";
+        let chunks=split_document_chunks(doc,40);
+        assert!(chunks.len()>=2);
+        let joined=chunks.join("");
+        for key in ["前言。","内容一。","内容二。","内容三比较长一些。"] {
+            assert!(joined.contains(key),"chunking lost content: {key}");
+        }
+        for chunk in &chunks {
+            assert!(chunk.chars().count()<=60,"chunk too large: {}",chunk.chars().count());
+        }
+        assert_eq!(split_document_chunks("short",6000).len(),1);
+    }
+
+    #[test]
+    fn dedupe_renames_and_keeps_first() {
+        use crate::domain::{ResourceItem,ResourcePlan};
+        let item=|id:&str,name:&str,section:&str| ResourceItem{id:id.into(),name:name.into(),specification:"s".into(),source_section:section.into(),dependencies:"".into(),priority:crate::domain::Priority::P1,acceptance:"a".into()};
+        let mut plan=ResourcePlan{
+            features:vec![item("F-001","采集","核心循环"),item("F-002","采集","核心循环"),item("F-003","制作","核心循环")],
+            art:vec![item("A-009","采集界面","交互")],
+            audio:vec![],
+        };
+        dedupe_and_renumber(&mut plan);
+        assert_eq!(plan.features.iter().map(|i|i.id.as_str()).collect::<Vec<_>>(),vec!["F-001","F-002"]);
+        assert_eq!(plan.art[0].id,"A-001");
     }
 }
