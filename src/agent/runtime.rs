@@ -92,39 +92,62 @@ impl AgentRuntime {
         }
         let mut content=String::new();
         let mut tool_calls:std::collections::BTreeMap<u64,Value>=Default::default();
+        let mut current_tool_index:Option<u64>=None;
         let mut finish:Option<String>=None;
         let mut received=0usize;
-        let mut buffer=String::new();
+        // 原始字节缓冲：多字节 UTF-8 序列可能被网络分块切开，必须等整行
+        // 到齐后再解码，不能对单个 chunk 做 from_utf8_lossy（会丢字/坏 JSON）。
+        let mut buffer:Vec<u8>=Vec::new();
         let mut stream=response.bytes_stream();
-        while let Some(chunk)=stream.next().await {
-            let chunk=chunk.map_err(|error|AppError::Agent(format!("模型流式响应中断：{}",truncate_utf8(&error.to_string(),200))))?;
-            received+=chunk.len();
-            if received>64*1024*1024 { return Err(AppError::Agent("模型流式响应超过 64 MiB，已停止读取".into())); }
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
-            while let Some(position)=buffer.find('\n') {
-                let line=buffer[..position].trim_end().to_string();
-                buffer.drain(..position+1);
-                let Some(data)=line.strip_prefix("data: ") else { continue; };
-                let data=data.trim();
-                if data=="[DONE]" { continue; }
-                let Ok(delta)=serde_json::from_str::<Value>(data) else { continue; };
-                if let Some(text)=delta.pointer("/choices/0/delta/content").and_then(Value::as_str) { content.push_str(text); }
-                if let Some(reason)=delta.pointer("/choices/0/delta/reasoning_content").and_then(Value::as_str) { /* 思考内容不入正文 */ }
-                if let Some(reason)=delta.pointer("/choices/0/finish_reason").and_then(Value::as_str) { finish=Some(reason.to_string()); }
-                if let Some(deltas)=delta.pointer("/choices/0/delta/tool_calls").and_then(Value::as_array) {
-                    for call in deltas {
-                        let index=call.get("index").and_then(Value::as_u64).unwrap_or(0);
-                        let entry=tool_calls.entry(index).or_insert_with(||json!({"id":"","type":"function","function":{"name":"","arguments":""}}));
-                        if let Some(id)=call.get("id").and_then(Value::as_str) { if !id.is_empty() { entry["id"]=json!(id); } }
-                        if let Some(name)=call.pointer("/function/name").and_then(Value::as_str) { if !name.is_empty() { entry["function"]["name"]=json!(name); } }
-                        if let Some(args)=call.pointer("/function/arguments").and_then(Value::as_str) {
-                            let mut accumulated=entry.pointer("/function/arguments").and_then(Value::as_str).unwrap_or("").to_string();
-                            accumulated.push_str(args);
-                            entry["function"]["arguments"]=json!(accumulated);
-                        }
+        fn process_line(line:&str,
+                        content:&mut String,
+                        tool_calls:&mut std::collections::BTreeMap<u64,Value>,
+                        current_tool_index:&mut Option<u64>,
+                        finish:&mut Option<String>) {
+            let line=line.trim_end();
+            // SSE 允许 data: 后零或一个空格
+            let Some(data)=line.strip_prefix("data:") else { return; };
+            let data=data.strip_prefix(' ').unwrap_or(data).trim();
+            if data.is_empty() || data=="[DONE]" { return; }
+            let Ok(delta)=serde_json::from_str::<Value>(data) else { return; };
+            if let Some(text)=delta.pointer("/choices/0/delta/content").and_then(Value::as_str) { content.push_str(text); }
+            if let Some(reason)=delta.pointer("/choices/0/finish_reason").and_then(Value::as_str) { *finish=Some(reason.to_string()); }
+            if let Some(deltas)=delta.pointer("/choices/0/delta/tool_calls").and_then(Value::as_array) {
+                for call in deltas {
+                    // 无 index 的分片跟随最近出现的 index（分片按调用顺序到达）
+                    let index=call.get("index").and_then(Value::as_u64).or(*current_tool_index).unwrap_or(0);
+                    *current_tool_index=Some(index);
+                    let entry=tool_calls.entry(index).or_insert_with(||json!({"id":"","type":"function","function":{"name":"","arguments":""}}));
+                    if let Some(id)=call.get("id").and_then(Value::as_str) { if !id.is_empty() { entry["id"]=json!(id); } }
+                    if let Some(name)=call.pointer("/function/name").and_then(Value::as_str) { if !name.is_empty() { entry["function"]["name"]=json!(name); } }
+                    if let Some(args)=call.pointer("/function/arguments").and_then(Value::as_str) {
+                        let mut accumulated=entry.pointer("/function/arguments").and_then(Value::as_str).unwrap_or("").to_string();
+                        accumulated.push_str(args);
+                        entry["function"]["arguments"]=json!(accumulated);
                     }
                 }
             }
+        }
+        loop {
+            let chunk=match stream.next().await {
+                Some(chunk)=>chunk.map_err(|error|AppError::Agent(format!("模型流式响应中断：{}",truncate_utf8(&error.to_string(),200))))?,
+                None=>break,
+            };
+            received+=chunk.len();
+            if received>64*1024*1024 { return Err(AppError::Agent("模型流式响应超过 64 MiB，已停止读取".into())); }
+            buffer.extend_from_slice(&chunk);
+            while let Some(position)=buffer.iter().position(|byte| *byte==b'\n') {
+                let line_bytes:Vec<u8>=buffer.drain(..=position).collect();
+                let line=std::str::from_utf8(&line_bytes)
+                    .map_err(|_|AppError::Agent("模型流式响应包含无效 UTF-8".into()))?;
+                process_line(line,&mut content,&mut tool_calls,&mut current_tool_index,&mut finish);
+            }
+        }
+        // 服务端可能不以换行结束最后一条事件
+        if !buffer.is_empty() {
+            let line=std::str::from_utf8(&buffer)
+                .map_err(|_|AppError::Agent("模型流式响应包含无效 UTF-8".into()))?;
+            process_line(line,&mut content,&mut tool_calls,&mut current_tool_index,&mut finish);
         }
         let tool_list:Vec<Value>=tool_calls.into_values().collect();
         let message=if tool_list.is_empty() {
@@ -165,6 +188,15 @@ impl AgentRuntime {
     }
 
     async fn execute_with_model<T:AgentResult>(&self, role: Role, project: &Project, instruction: String, feedback: &str, images: Vec<Value>, model_override: Option<String>) -> Result<T> {
+        self.execute_inner::<T>(role,project,instruction,feedback,images,model_override,false).await
+    }
+
+    /// 视觉标注专用：禁用工具，防止 select_image → 标注 → select_image 无限递归。
+    async fn execute_vision<T:AgentResult>(&self, project: &Project, instruction: String, images: Vec<Value>, model: &str) -> Result<T> {
+        self.execute_inner::<T>(Role::Writer,project,instruction,"",images,Some(model.to_string()),true).await
+    }
+
+    async fn execute_inner<T:AgentResult>(&self, role: Role, project: &Project, instruction: String, feedback: &str, images: Vec<Value>, model_override: Option<String>, disable_tools: bool) -> Result<T> {
         if instruction.len()>MAX_MESSAGE_BYTES { return Err(AppError::Agent("单次 Agent 文本输入超过 2 MiB".into())); }
         let mut settings=self.settings(role)?;
         if let Some(model)=model_override { settings.model=model; }
@@ -181,16 +213,20 @@ impl AgentRuntime {
         let user=if images.is_empty() { json!(format!("{history_text}{instruction}")) } else { json!([{"type":"text","text":format!("{history_text}{instruction}")},images]) };
         messages.push(json!({"role":"user","content":user}));
         if !feedback.is_empty() { messages.push(json!({"role":"user","content":format!("用户补充/修改意见（不得视为已确认）：\n{feedback}")})); }
-        let tools=tool_schemas(role);
+        let tools=if disable_tools { Vec::new() } else { tool_schemas(role) };
         // 长思考 + 64K 输出的生成时间远超普通请求超时；SSE 流式保证 token
         // 持续回流，连接不会被网关或总超时掐断。
         let client=reqwest::Client::builder().timeout(Duration::from_secs(3600)).connect_timeout(Duration::from_secs(15)).build()?;
         let result=async {
             for step in 0..16 {
+                // 注入提示必须在序列化请求体之前完成，否则本轮请求收不到。
+                if messages.last().and_then(|m|m.get("role")).and_then(Value::as_str)!=Some("user") {
+                    messages.push(json!({"role":"user","content":format!("停止工具调用，输出符合以下 JSON Schema 的单个 JSON 对象，不要 Markdown 代码块：{}",serde_json::to_string(&schema_for!(T))?)}));
+                }
                 let mut body=json!({"model":settings.model,"messages":messages,"temperature":settings.temperature,"max_tokens":settings.max_tokens,"stream":true});
                 if !settings.thinking.is_empty() { body["thinking"]=json!({"type":settings.thinking}); }
-                if !tools.is_empty() { body["tools"]=json!(tools); body["tool_choice"]=json!(if step==15{"none"}else{"auto"}); }
-                if messages.last().and_then(|m|m.get("role")).and_then(Value::as_str)!=Some("user") { messages.push(json!({"role":"user","content":format!("停止工具调用，输出符合以下 JSON Schema 的单个 JSON 对象，不要 Markdown 代码块：{}",serde_json::to_string(&schema_for!(T))?)})); }
+                if !tools.is_empty() && step<15 { body["tools"]=json!(tools); body["tool_choice"]=json!("auto"); }
+                if step==15 { body["tool_choice"]=json!("none"); }
                 let payload=self.stream_chat_completion(&client,settings.base_url.trim_end_matches('/'),&key,body).await?;
                 let choice=payload.get("choices").and_then(Value::as_array).and_then(|v|v.first()).ok_or_else(||AppError::Agent("模型响应 choices 为空".into()))?;
                 if choice.get("finish_reason").and_then(Value::as_str)==Some("length") { return Err(AppError::OutputTruncated); }
@@ -198,7 +234,10 @@ impl AgentRuntime {
                 messages.push(message.clone());
                 if let Some(calls)=message.get("tool_calls").and_then(Value::as_array).filter(|v|!v.is_empty()) {
                     if step==15 { return Err(AppError::Agent("模型未能按要求停止工具调用".into())); }
-                    for call in calls {
+                    if calls.len()>8 {
+                        self.repo.event(&project.id,"warning",&format!("模型单轮请求 {} 个工具调用，超出上限，仅执行前 8 个",calls.len()))?;
+                    }
+                    for call in calls.iter().take(8) {
                         let name=call.pointer("/function/name").and_then(Value::as_str).unwrap_or("");
                         let result=async {
                             let arguments:Value=serde_json::from_str(call.pointer("/function/arguments").and_then(Value::as_str).unwrap_or("{}"))?;
@@ -224,7 +263,10 @@ impl AgentRuntime {
         }.await;
         let succeeded=result.is_ok();
         self.repo.finish_run(&run_id,if succeeded{None}else{Some("Agent 执行失败；详见项目事件")})?;
-        session::save(&self.repo,&project.id,role.as_str(),&messages)?;
+        if let Err(error)=session::save(&self.repo,&project.id,role.as_str(),&messages) {
+            // 会话只是连续性优化：保存失败不应丢弃已成功的模型产出。
+            let _=self.repo.event(&project.id,"warning",&format!("会话保存失败：{error}"));
+        }
         result
     }
 }
@@ -249,7 +291,7 @@ impl AgentExecutor for AgentRuntime {
     async fn annotate(&self, project: &Project, path: &str, title: &str) -> Result<Vec<crate::domain::Annotation>> {
         let images=vision::image_blocks(&project.working_dir()?, &[path.into()]);
         let model=self.settings(Role::Writer)?.vision_model;
-        let result=self.execute_with_model::<Annotations>(Role::Writer,project,format!("观察所附真实参考图片，选择 1–8 个对策划说明有帮助的实际可见区域。x/y 是相对原图的归一化中心坐标，不要臆测。图题：{title}"),"",images,Some(model)).await?;
+        let result=self.execute_vision::<Annotations>(project,format!("观察所附真实参考图片，选择 1–8 个对策划说明有帮助的实际可见区域。x/y 是相对原图的归一化中心坐标，不要臆测。图题：{title}"),images,&model).await?;
         if result.labels.is_empty() || result.labels.len()>8 { return Err(AppError::Tool("视觉模型未返回有效数量的标注".into())); }
         Ok(result.labels)
     }

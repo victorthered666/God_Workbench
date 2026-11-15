@@ -54,7 +54,7 @@ pub fn render(project: &Project, output: &Path) -> Result<()> {
     while index<lines.len() {
         let line=lines[index];
         if line.is_empty() { index+=1; continue; }
-        if line.starts_with('|') && index+1<lines.len() && lines[index+1].starts_with("| ---") {
+        if line.starts_with('|') && index+1<lines.len() && is_table_separator(lines[index+1]) {
             let headers=split_table(line);
             index+=2;
             let mut rows=vec![TableRow::new(headers.iter().map(|value|cell(value,true)).collect()).cant_split()];
@@ -75,7 +75,7 @@ pub fn render(project: &Project, output: &Path) -> Result<()> {
                         let bytes=std::fs::read(&path)?;
                         let dimensions=image::image_dimensions(&path)?;
                         let width=5_800_000u32;
-                        let height=(u64::from(width)*u64::from(dimensions.1)/u64::from(dimensions.0))as u32;
+                        let height=(u64::from(width)*u64::from(dimensions.1)/u64::from(dimensions.0)).min(u64::from(u32::MAX))as u32;
                         figure+=1;
                         document=document.add_paragraph(Paragraph::new().add_run(Run::new().add_image(Pic::new(&bytes).size(width,height))).align(AlignmentType::Center));
                         document=document.add_paragraph(paragraph(&format!("图 {figure}  {alt}"),18,"5F7474",false).align(AlignmentType::Center));
@@ -99,7 +99,33 @@ pub fn render(project: &Project, output: &Path) -> Result<()> {
     enable_field_updates(output)
 }
 
-fn split_table(line: &str) -> Vec<String> { line.trim_matches('|').split('|').map(|cell|cell.trim().replace("\\|","|")).collect() }
+fn split_table(line: &str) -> Vec<String> {
+    // 先按未转义的 | 切分，再还原转义；直接 split 会把单元格内的 \| 当分隔符。
+    let mut cells=Vec::new();
+    let mut current=String::new();
+    let mut escaped=false;
+    for ch in line.trim_matches('|').chars() {
+        if escaped {
+            if ch=='|' { current.push('|'); } else { current.push('\\'); current.push(ch); }
+            escaped=false;
+        } else if ch=='\\' { escaped=true; }
+        else if ch=='|' { cells.push(current.trim().to_string()); current.clear(); }
+        else { current.push(ch); }
+    }
+    if escaped { current.push('\\'); }
+    cells.push(current.trim().to_string());
+    cells
+}
+
+/// 结构化识别表头分隔行：| --- | :---: | 等变体都接受。
+fn is_table_separator(line: &str) -> bool {
+    let cells=split_table(line);
+    cells.len()>=2 && cells.iter().all(|cell| {
+        let trimmed=cell.trim();
+        let body=trimmed.trim_matches(':');
+        !body.is_empty() && body.chars().all(|c| c=='-')
+    })
+}
 
 fn enable_field_updates(path: &Path) -> Result<()> {
     let input=File::open(path)?;

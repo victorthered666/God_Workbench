@@ -31,7 +31,11 @@ pub fn annotate(root: &Path, path: &str, title: &str, labels: &[Annotation], sou
     let output=root.join("assets/images").join(&filename);
     canvas.save(output)?;
     let relative=format!("assets/images/{filename}");
-    let mut caption=format!("![{}]({})\n\n*标注：{}*",title,relative,legend.join("；"));
+    // title/label 来自模型输出，需转义以免破坏图片链接或注入 Markdown 结构。
+    fn md_text(text:&str)->String { text.chars().filter(|c|*c!='\n'&&*c!='\r').map(|c| if matches!(c,'['|']'|'('|')') { ' ' } else { c }).take(160).collect() }
+    let safe_title=md_text(title);
+    let safe_legend=legend.iter().map(|item| md_text(item)).collect::<Vec<_>>().join("；");
+    let mut caption=format!("![{}]({})\n\n*标注：{}*",safe_title,relative,safe_legend);
     if !source_url.is_empty() {
         caption.push_str(&format!("\n\n原图：[检索来源]({})",source_url));
         if !source_page.is_empty() { caption.push_str(&format!(" · [来源网页]({})",source_page)); }

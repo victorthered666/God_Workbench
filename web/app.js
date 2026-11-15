@@ -13,7 +13,8 @@ const stages = [
   ['document', '文档撰写', '规则细化与参考图'], ['interaction', '交互补全', '状态、流程与线框图'],
   ['resources', '资源拆解', '功能、美术与音效'], ['review', '架构审核', '质量门禁与定稿'],
 ];
-const statusText = { audit_ready: '文档已导入，等待结构审核', audit_done: '审核完成，查看问题报告', research_review: '请审阅调研意见', framework_review: '请确认文档框架', revision_review: '请确认修改影响范围', framework_approved: '框架已确认', interaction: '文档已生成，等待交互细化', resources: '交互已补全，等待资源拆解', review: '等待架构审核', approved: '审核通过，可导出', needs_human: '审核未通过，需要人工处理', interrupted: '执行中断，可检查并恢复' };
+const statusText = { audit_ready: '文档已导入，等待结构审核', audit_done: '审核完成，查看问题报告', revision_planning: '正在分析修改影响范围', research_review: '请审阅调研意见', framework_review: '请确认文档框架', revision_review: '请确认修改影响范围', framework_approved: '框架已确认', interaction: '文档已生成，等待交互细化', resources: '交互已补全，等待资源拆解', review: '等待架构审核', approved: '审核通过，可导出', needs_human: '审核未通过，需要人工处理', interrupted: '执行中断，可检查并恢复' };
+const safeUrl = (url) => /^https?:\/\//i.test(url || '') ? url : '#';
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const toast = (message) => { $('#toast').textContent = message; $('#toast').classList.add('show'); clearTimeout(state.toast); state.toast = setTimeout(() => $('#toast').classList.remove('show'), 5500); };
 async function api(path, options = {}) {
@@ -25,7 +26,7 @@ async function api(path, options = {}) {
 }
 function openModal(content, wide = false) { $('#modal-content').innerHTML = content; $('#modal').classList.toggle('wide', wide); $('#modal-backdrop').hidden = false; }
 function closeModal() { $('#modal-backdrop').hidden = true; $('#modal-content').innerHTML = ''; }
-function showHome() { state.project = null; state.detail = null; clearTimeout(state.timer); stopRunAnimation(); $('#workspace').hidden = true; $('#home').hidden = false; renderProjects(); }
+function showHome() { state.loadSeq = (state.loadSeq || 0) + 1; state.project = null; state.detail = null; clearTimeout(state.timer); stopRunAnimation(); $('#workspace').hidden = true; $('#home').hidden = false; renderProjects(); }
 function statusBadge(status, simulated = false) { const waiting = status.includes('review') || status === 'needs_human'; const error = status === 'interrupted' || status === 'needs_human'; return `<span class="badge ${error ? 'error' : waiting ? 'waiting' : ''}">${esc(simulated && status === 'approved' ? '模拟审核 · 仅供验收' : statusText[status] || (status.startsWith('running:') ? '正在执行' : status))}</span>`; }
 function startRunAnimation(roleKey) {
   stopRunAnimation();
@@ -69,12 +70,15 @@ function newProject() {
   });
 }
 async function loadProject(id) {
-  try { state.detail = await api(`/api/projects/${id}`); state.project = state.detail.project; $('#home').hidden = true; $('#workspace').hidden = false; renderWorkspace(); schedulePoll(); } catch (error) { toast(error.message); }
+  const seq = state.loadSeq = (state.loadSeq || 0) + 1;
+  try { const detail = await api(`/api/projects/${id}`); if (seq !== state.loadSeq) return;
+    state.detail = detail; state.project = detail.project; $('#home').hidden = true; $('#workspace').hidden = false; renderWorkspace(); schedulePoll();
+  } catch (error) { toast(error.message); }
 }
-function schedulePoll() { clearTimeout(state.timer); if (state.project?.status.startsWith('running:')) state.timer = setTimeout(() => loadProject(state.project.id), 2500); }
+function schedulePoll() { clearTimeout(state.timer); const st = state.project?.status || ''; if (st.startsWith('running:')) state.timer = setTimeout(() => loadProject(state.project.id), 2500); else if (st === 'interrupted' || st === 'revision_planning') state.timer = setTimeout(() => loadProject(state.project.id), 5000); }
 function currentStage() {
   const p = state.project;
-  if (p.artifacts.project_type === 'document_review') return p.status === 'audit_done' ? 'audit' : 'import';
+  if (p.artifacts.project_type === 'document_review') { if (p.status.startsWith('running:audit')) return 'audit'; return p.status === 'audit_done' ? 'audit' : 'import'; }
   if (p.status === 'running:revise' || p.status === 'needs_human') return 'review';
   if (p.status.startsWith('running:')) return p.status.split(':')[1] === 'revision_plan' ? 'research' : p.status.split(':')[1];
   if (p.status === 'research_review') return 'research'; if (p.status === 'revision_review') return 'research';
@@ -97,7 +101,7 @@ function renderWorkspace() {
   const running = p.status.startsWith('running:'); const error = p.status === 'interrupted' || p.status === 'needs_human';
   $('#status-banner').className = `status-banner ${running ? 'running ' : ''}${error ? 'error' : ''}`;
   const continueStage = (!running && !error) ? nextManualStage(p) : null;
-  $('#status-banner').innerHTML = `<span>${running ? '◌' : error ? '!' : '●'}</span><span>${esc(p.error || (p.artifacts.review?.content?.summary?.includes('本地模拟审核') ? '模拟审核 · 仅供验收' : statusText[p.status]) || `正在执行 ${p.status.slice(8)}`)}</span>${running ? `<span id="run-elapsed" class="run-elapsed"></span><button class="secondary small" id="cancel-run">取消</button>` : continueStage ? `<button class="primary small" id="continue-run">继续：${manualStageLabels[continueStage]}</button>` : error && recoverStage() ? '<button class="secondary small" id="recover-run">从当前阶段恢复</button>' : p.status === 'audit_done' ? '<button class="secondary small" id="reaudit-run">重新审核</button>' : ''}`;
+  $('#status-banner').innerHTML = `<span>${running ? '◌' : error ? '!' : '●'}</span><span>${esc(p.error || (p.artifacts.review?.content?.summary?.includes('本地模拟审核') ? '模拟审核 · 仅供验收' : statusText[p.status]) || `当前状态 ${p.status}`)}</span>${running ? `<span id="run-elapsed" class="run-elapsed"></span><button class="secondary small" id="cancel-run">取消</button>` : continueStage ? `<button class="primary small" id="continue-run">继续：${manualStageLabels[continueStage]}</button>` : error && recoverStage() ? '<button class="secondary small" id="recover-run">从当前阶段恢复</button>' : p.status === 'audit_done' ? '<button class="secondary small" id="reaudit-run">重新审核</button>' : ''}`;
   if (running) {
     const startEvt = state.detail.events.find((e) => e.kind === 'stage' && e.message.startsWith('开始执行'));
     state.runningSince = startEvt ? new Date(startEvt.created_at).getTime() : Date.now();
@@ -126,7 +130,7 @@ function nextManualStage(p) {
 }
 function renderArtifact() {
   const p = state.project; const stage = currentStage();
-  let key = stage;
+  let key = stage; if (p.artifacts.project_type === 'document_review' && key === 'audit') key = 'audit_report';
   if (p.status === 'revision_review') key = 'revision_plan';
   if (stage === 'document' || stage === 'interaction' || stage === 'resources') key = 'document';
   const record = p.artifacts[key];
@@ -166,9 +170,9 @@ function editGate(stage, content) {
   $('#save-gate').onclick = () => action(`/api/projects/${state.project.id}/stages/${stage}/feedback`, '已保存手动修改', { content: $('#gate-json').value, feedback: '用户手动编辑阶段产物' }, true);
 }
 function renderAssets() {
-  $('#assets-list').innerHTML = state.detail.assets.length ? `<div class="asset-grid">${state.detail.assets.map((a) => `<div class="asset-card"><img src="/api/projects/${state.project.id}/asset?path=${encodeURIComponent(a.local_path)}" alt="项目素材"><p>${esc(a.metadata.width)} × ${esc(a.metadata.height)} · ${esc(a.local_path)}</p><p>原图：<a href="${esc(a.source_url)}" target="_blank" rel="noopener noreferrer">${esc(a.source_url)}</a></p>${a.source_page ? `<p>来源页：${esc(a.source_page)}</p>` : ''}</div>`).join('')}</div>` : '<p class="modal-intro">尚无已下载素材。检索到的候选不会自动算作项目素材。</p>';
+  $('#assets-list').innerHTML = state.detail.assets.length ? `<div class="asset-grid">${state.detail.assets.map((a) => `<div class="asset-card"><img src="/api/projects/${state.project.id}/asset?path=${encodeURIComponent(a.local_path)}" alt="项目素材"><p>${esc(a.metadata.width)} × ${esc(a.metadata.height)} · ${esc(a.local_path)}</p><p>原图：<a href="${safeUrl(a.source_url)}" target="_blank" rel="noopener noreferrer">${esc(a.source_url)}</a></p>${a.source_page ? `<p>来源页：${esc(a.source_page)}</p>` : ''}</div>`).join('')}</div>` : '<p class="modal-intro">尚无已下载素材。检索到的候选不会自动算作项目素材。</p>';
   const evidence = state.detail.evidence.flatMap((e) => (e.payload.results || []).map((r) => ({ ...r, query: e.query })));
-  $('#evidence-list').innerHTML = evidence.length ? evidence.map((r) => `<div class="evidence"><small>${esc(r.id || '')} · ${esc(r.site_name || '检索记录')}</small><br><a href="${esc(r.url)}" target="_blank" rel="noopener noreferrer">${esc(r.title || r.url)}</a><p>${esc(r.snippet || r.summary || '')}</p><small>检索词：${esc(r.query)}</small></div>`).join('') : '<p class="modal-intro">尚无检索记录。</p>';
+  $('#evidence-list').innerHTML = evidence.length ? evidence.map((r) => `<div class="evidence"><small>${esc(r.id || '')} · ${esc(r.site_name || '检索记录')}</small><br><a href="${safeUrl(r.url)}" target="_blank" rel="noopener noreferrer">${esc(r.title || r.url)}</a><p>${esc(r.snippet || r.summary || '')}</p><small>检索词：${esc(r.query)}</small></div>`).join('') : '<p class="modal-intro">尚无检索记录。</p>';
 }
 function renderHistory() {
   $('#versions-list').innerHTML = state.detail.versions.length ? state.detail.versions.slice().reverse().map((v) => `<div class="evidence"><b>${esc(v.stage)} · v${v.version}</b><small> ${esc(v.created_at)}</small><p>${esc(v.feedback || 'Agent 生成')}</p><details><summary>查看该版本</summary><pre>${esc(JSON.stringify(v.content, null, 2))}</pre></details></div>`).join('') : '<p>暂无版本记录</p>';
@@ -214,7 +218,7 @@ function auditProjectModal() {
 }
 
 function settingsModal(role = state.role) {
-  state.role = role; const s = state.settings[role];
+  state.role = role; const s = state.settings[role] || {};
   openModal(`<h2 id="modal-title">Agent 与搜索设置</h2><p class="modal-intro">每个角色独立配置。更改只影响后续执行；已保存的阶段快照不会被改写。</p><div class="settings-layout"><div class="role-list">${Object.entries(roles).map(([key, value]) => `<button data-role="${key}" class="${key === role ? 'active' : ''}">${value}</button>`).join('')}</div><form id="settings-form" class="setting-form"><div class="field-row"><label class="field"><span>模型</span><input name="model" value="${esc(s.model)}" required></label><label class="field"><span>Base URL</span><input name="base_url" value="${esc(s.base_url)}" required></label></div><div class="field-row"><label class="field"><span>温度</span><input name="temperature" type="number" min="0" max="2" step="0.1" value="${s.temperature}"></label><label class="field"><span>最大输出 Tokens</span><input name="max_tokens" type="number" min="512" max="65536" value="${s.max_tokens}"></label><label class="field"><span>思考模式</span><input name="thinking" value="${esc(s.thinking||'enabled')}" readonly class="readonly-field"><small>按当前策略强制开启（enabled）；输出预算已配 64K。</small></label></div><label class="field"><span>密钥环境变量名</span><input name="api_key_env" value="${esc(s.api_key_env)}"><small>显式保存的本地密钥优先；未保存时读取此环境变量。</small></label>${role === 'writer' ? `<label class="field"><span>视觉标注模型</span><input name="vision_model" value="${esc(s.vision_model || 'deepseek-flash')}"><small>仅用于观察已下载参考图并选择标注位置。</small></label>` : ''}<label class="field"><span>API Key ${s.key_configured ? '（已配置，留空保持不变）' : '（待配置）'}</span><input name="api_key" type="password" autocomplete="off" placeholder="不会回显、不会导出"></label><label class="field"><span>Skill 名称（逗号分隔）</span><input name="skills" value="${esc(s.skills.join(', '))}"></label><label class="field"><span>系统提示词</span><textarea name="prompt">${esc(s.prompt)}</textarea></label><div class="form-actions"><button class="primary" type="submit">保存此角色</button></div></form></div><div class="settings-footer"><h3>豆包图片搜索</h3><form id="search-key-form" class="field-row"><label class="field"><span>WEB_SEARCH_API_KEY</span><input name="api_key" type="password" placeholder="图片搜索专用密钥" autocomplete="off"></label><div class="form-actions"><button class="secondary" type="submit">保存搜索密钥</button></div></form><div class="notice">DeepSeek 用于模型、网页检索与抓取；豆包用于图片检索。图片仅作研究参考，请核对使用授权。参考图标注使用 writer 的 vision_model（默认 deepseek-flash）。</div></div>`, true);
   document.querySelectorAll('[data-role]').forEach((b) => b.onclick = () => settingsModal(b.dataset.role));
   $('#settings-form').onsubmit = async (event) => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.target)); data.temperature = Number(data.temperature); data.max_tokens = Number(data.max_tokens); data.skills = data.skills.split(',').map((x) => x.trim()).filter(Boolean); if (!data.api_key) delete data.api_key; try { await api(`/api/settings/${role}`, { method: 'PUT', body: JSON.stringify(data) }); toast('角色设置已保存'); await refreshProjects(); settingsModal(role); } catch (error) { toast(error.message); } };
@@ -246,6 +250,6 @@ $('#autorun-toggle').onclick = async () => {
   } catch (error) { toast(error.message); }
 };
 $('.modal-close').onclick = closeModal; $('#modal-backdrop').addEventListener('click', (e) => { if (e.target === $('#modal-backdrop')) closeModal(); }); document.addEventListener('click', (e) => { if (e.target.matches('[data-close]')) closeModal(); }); document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
-document.querySelectorAll('[data-tab]').forEach((button) => button.onclick = () => { document.querySelectorAll('[data-tab]').forEach((b) => b.classList.toggle('active', b === button)); document.querySelectorAll('.tab-content').forEach((el) => el.hidden = el.id !== `tab-${button.dataset.tab}`); if (button.dataset.tab === 'document') loadPreview(); });
-$('#edit-document').onclick = async () => { if (!state.editing) { state.editing = true; $('#document-preview').hidden = true; $('#document-editor').hidden = false; $('#edit-document').textContent = '保存并重新进入资源阶段'; } else { try { await api(`/api/projects/${state.project.id}/document`, { method: 'PUT', body: JSON.stringify({ content: $('#document-editor').value }) }); state.editing = false; $('#document-preview').hidden = false; $('#document-editor').hidden = true; $('#edit-document').textContent = '编辑 Markdown'; toast('正文已保存；请继续资源拆解与审核'); await loadProject(state.project.id); } catch (error) { toast(error.message); } } };
+document.querySelectorAll('[data-tab]').forEach((button) => button.onclick = () => { document.querySelectorAll('[data-tab]').forEach((b) => b.classList.toggle('active', b === button)); document.querySelectorAll('.tab-content').forEach((el) => el.hidden = el.id !== `tab-${button.dataset.tab}`); if (button.dataset.tab === 'document' && !state.editing) loadPreview(); });
+$('#edit-document').onclick = async () => { if (!state.editing) { state.editing = true; $('#document-preview').hidden = true; $('#document-editor').hidden = false; $('#edit-document').textContent = state.project?.artifacts?.project_type === 'document_review' ? '保存并回到待审核' : '保存并重新进入资源阶段'; } else { try { await api(`/api/projects/${state.project.id}/document`, { method: 'PUT', body: JSON.stringify({ content: $('#document-editor').value }) }); state.editing = false; $('#document-preview').hidden = false; $('#document-editor').hidden = true; $('#edit-document').textContent = '编辑 Markdown'; toast(state.project?.artifacts?.project_type === 'document_review' ? '导入文档已保存；可重新进行结构审核' : '正文已保存；请继续资源拆解与审核'); await loadProject(state.project.id); } catch (error) { toast(error.message); } } };
 refreshProjects().catch((error) => toast(error.message));

@@ -187,6 +187,15 @@ async fn save_settings(State(state): State<AppState>, Path(role): Path<String>, 
     let role=match role.as_str() { "research"=>Role::Research,"architect"=>Role::Architect,"writer"=>Role::Writer,"interaction"=>Role::Interaction,"producer"=>Role::Producer,_=>return Err(AppError::Invalid("未知角色".into())) };
     let mut settings=request.clone();
     if settings.api_key_env.is_empty() || !settings.api_key_env.chars().all(|c|c.is_ascii_uppercase()||c.is_ascii_digit()||c=='_') { return Err(AppError::Invalid("密钥环境变量名不合法".into())); }
+    // 保存前做与运行时一致的校验：一条坏配置会永久打挂 GET /api/bootstrap。
+    if !(0.0..=2.0).contains(&settings.temperature) { return Err(AppError::Invalid("temperature 必须在 0–2 之间".into())); }
+    if !(512..=65536).contains(&settings.max_tokens) { return Err(AppError::Invalid("max_tokens 必须在 512–65536 之间".into())); }
+    if settings.base_url.is_empty() { return Err(AppError::Invalid("Base URL 不能为空".into())); }
+    if settings.base_url.starts_with("http://") && !settings.base_url.starts_with("http://127.0.0.1") && !settings.base_url.starts_with("http://localhost") { return Err(AppError::Invalid("Base URL 必须使用 HTTPS（本机测试地址除外）".into())); }
+    if !matches!(settings.thinking.as_str(), "" | "enabled" | "disabled") { return Err(AppError::Invalid("thinking 只能为空、enabled 或 disabled".into())); }
+    for skill in &settings.skills {
+        if skill.is_empty() || !skill.chars().all(|c|c.is_ascii_alphanumeric()||c=='-') { return Err(AppError::Invalid(format!("Skill 名称不合法：{skill}"))); }
+    }
     if let Some(key)=&settings.api_key { if !key.is_empty() { state.secrets.set(&settings.api_key_env,key)?; } }
     settings.api_key=None;
     state.repo.set_setting(&format!("agent:{}",role.as_str()),serde_json::to_value(&settings)?)?;

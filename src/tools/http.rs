@@ -26,11 +26,23 @@ impl ToolHttp {
             if traffic { request=request.header("X-Traffic-Tag","skill_web_search_common"); }
             let mut response=match request.send().await {
                 Ok(response) => response,
-                Err(error) if attempt<2 => { let _=error; tokio::time::sleep(Duration::from_secs(1<<attempt)).await; continue; },
+                // 只对连接建立阶段失败重试：请求已发出后的超时/中断
+                // 服务端可能已计费，盲目重试会双倍扣费。
+                Err(error) if attempt<2 && error.is_connect() => {
+                    let _=error; tokio::time::sleep(Duration::from_secs(1<<attempt)).await; continue;
+                },
                 Err(error) => return Err(error.into()),
             };
             let status=response.status();
-            let bytes=bounded_body(&mut response).await?;
+            let retryable=matches!(status,StatusCode::REQUEST_TIMEOUT|StatusCode::TOO_MANY_REQUESTS)||status.is_server_error();
+            let bytes=match bounded_body(&mut response).await {
+                Ok(bytes)=>bytes,
+                // 可重试状态码的响应体读取失败同样按该状态码的退避策略重试。
+                Err(error) if attempt<2 && retryable => {
+                    let _=error; tokio::time::sleep(Duration::from_secs(1<<attempt)).await; continue;
+                },
+                Err(error)=>return Err(error),
+            };
             if status==StatusCode::OK {
                 return serde_json::from_slice(&bytes).map_err(|_|AppError::Tool("搜索服务返回了非 JSON 内容".into()));
             }

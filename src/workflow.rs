@@ -5,6 +5,7 @@ use crate::{agent::runtime::{AgentExecutor, AgentTask}, config::{Config, MAX_REV
 #[derive(Clone)]
 pub struct Workflow {
     pub repo: Repository,
+    last_created: std::sync::Arc<parking_lot::Mutex<Option<String>>>,
     pub agents: Arc<dyn AgentExecutor>,
     pub config: Config,
 }
@@ -12,15 +13,28 @@ pub struct Workflow {
 impl Workflow {
     const MAX_DOCUMENT_BYTES: usize = 2 * 1024 * 1024;
 
-    pub fn new(repo: Repository, agents: Arc<dyn AgentExecutor>, config: Config) -> Self { Self { repo, agents, config } }
+    pub fn new(repo: Repository, agents: Arc<dyn AgentExecutor>, config: Config) -> Self { Self { repo, agents, config, last_created:Default::default() } }
 
     pub fn create(&self, data: &ProjectCreate) -> Result<Project> {
+        match self.create_inner(data) {
+            Ok(project)=>Ok(project),
+            Err(error)=>{
+                // 初始化失败时清掉半成品行，避免出现没有工作目录的僵尸项目。
+                if let Some(id)=self.last_created.lock().take() { let _=self.repo.delete_project(&id); }
+                Err(error)
+            },
+        }
+    }
+
+    fn create_inner(&self, data: &ProjectCreate) -> Result<Project> {
         let mut project=self.repo.create_project(data)?;
+        *self.last_created.lock()=Some(project.id.clone());
         let root=self.config.output_dir.join(format!("{}-{}",safe_name(&data.name),&project.id[..8]));
         for path in ["assets/images","assets/diagrams","research","reviews","versions"] { fs::create_dir_all(root.join(path))?; }
         project.artifacts=json!({"working_dir":root});
         self.repo.update(&project.id,None,Some(project.artifacts.clone()),None,None,None)?;
         self.repo.event(&project.id,"stage","已创建项目；等待调研策划")?;
+        let _=self.last_created.lock().take();
         Ok(project)
     }
 
@@ -28,8 +42,19 @@ impl Workflow {
     pub fn create_audit(&self, data: &crate::domain::ProjectAuditCreate) -> Result<Project> {
         if data.markdown.trim().is_empty() { return Err(AppError::Invalid("导入的文档内容不能为空".into())); }
         if data.markdown.len()>Self::MAX_DOCUMENT_BYTES { return Err(AppError::Invalid("导入文档超过 2 MiB 限制".into())); }
+        match self.create_audit_inner(data) {
+            Ok(project)=>Ok(project),
+            Err(error)=>{
+                if let Some(id)=self.last_created.lock().take() { let _=self.repo.delete_project(&id); }
+                Err(error)
+            },
+        }
+    }
+
+    fn create_audit_inner(&self, data: &crate::domain::ProjectAuditCreate) -> Result<Project> {
         let request=ProjectCreate{name:data.name.clone(),purpose:"导入已撰写文档进行结构审核".into(),references:"用户导入文档".into(),platform:data.platform.clone(),audience:data.audience.clone()};
         let mut project=self.repo.create_project(&request)?;
+        *self.last_created.lock()=Some(project.id.clone());
         let root=self.config.output_dir.join(format!("{}-{}",safe_name(&data.name),&project.id[..8]));
         for path in ["assets/images","assets/diagrams","research","reviews","versions"] { fs::create_dir_all(root.join(path))?; }
         project.artifacts=json!({"working_dir":root,"project_type":"document_review"});
@@ -38,12 +63,16 @@ impl Workflow {
         fs::write(root.join("document.md"),&data.markdown)?;
         self.repo.update(&project.id,Some("audit_ready"),None,Some(None),None,None)?;
         self.repo.event(&project.id,"stage","已导入文档；等待结构审核")?;
+        let _=self.last_created.lock().take();
         Ok(project)
     }
 
     pub async fn execute(&self, project_id: &str, stage: &str, feedback: &str) -> Result<Project> {
         let project=self.repo.require(project_id)?;
         if project.running() { return Err(AppError::Workflow("已有阶段正在执行，请等待完成".into())); }
+        // 项目类型门禁：审核文档项目只可运行 audit；五角色项目不可运行 audit。
+        let audit_type=project.artifacts.get("project_type").and_then(Value::as_str)==Some("document_review");
+        if audit_type!=("audit"==stage) { return Err(AppError::Workflow(if audit_type {"审核文档项目只能执行结构审核（audit）".to_string()} else {"该阶段仅适用于审核文档项目".to_string()})); }
         let allowed=match stage {
             "research"=>matches!(project.status.as_str(),"research_review"|"interrupted"),
             "framework"=>matches!(project.status.as_str(),"framework_review"|"interrupted"),
@@ -59,10 +88,22 @@ impl Workflow {
         if stage=="framework" && project.status=="research_review" { return Err(AppError::Workflow("调研意见尚未由用户确认".into())); }
         if stage=="document" && project.status=="framework_review" { return Err(AppError::Workflow("文档框架尚未由用户确认".into())); }
         if !allowed { return Err(AppError::Workflow(format!("当前状态 {} 不能执行 {}；请先完成或确认前置阶段",project.status,stage))); }
-        self.repo.update(project_id,Some(&format!("running:{stage}")),None,Some(None),None,None)?;
-        self.repo.event(project_id,"stage",&format!("开始执行 {stage}"))?;
-        let run_id=self.repo.create_run(project_id,stage,json!({}))?;
-        if !feedback.is_empty() { self.repo.save_artifact(project_id,"feedback",json!({"stage":stage,"feedback":feedback}),feedback)?; }
+        // 原子抢占运行态：两个并发请求只会有一个成功，杜绝同项目双任务。
+        if !self.repo.claim_running(project_id,stage)? { return Err(AppError::Workflow("已有阶段正在执行，请等待完成".into())); }
+        let run_result=(|| -> Result<String> {
+            self.repo.event(project_id,"stage",&format!("开始执行 {stage}"))?;
+            let run_id=self.repo.create_run(project_id,stage,json!({}))?;
+            if !feedback.is_empty() { self.repo.save_artifact(project_id,"feedback",json!({"stage":stage,"feedback":feedback}),feedback)?; }
+            Ok(run_id)
+        })();
+        let run_id=match run_result {
+            Ok(run_id)=>run_id,
+            Err(error)=>{
+                self.repo.update(project_id,Some("interrupted"),None,Some(Some(error.to_string())),None,None)?;
+                self.repo.event(project_id,"error",&error.to_string())?;
+                return Err(error);
+            }
+        };
         let result=self.execute_stage(&project,stage,feedback).await;
         match result {
             Ok(())=>{ self.repo.finish_run(&run_id,None)?; self.repo.event(project_id,"stage",&format!("完成 {stage}"))?; self.repo.require(project_id) },
@@ -167,7 +208,7 @@ impl Workflow {
         let instruction=format!(
             "这是对既有 GDD 的修订。只输出 DocumentPatches JSON：patches 数组，每项 {{heading, markdown}}。\nheading 必须逐字取自下方章节清单；markdown 为该章节的完整替换内容（以该标题行开头，到下一同级或更高级标题为止）。只输出需要修改的章节，未受影响章节不要出现；确需新增章节时，heading 使用新标题并把补丁插入位置说明写进 markdown 首行注释。\n修改要求：{}\n受影响章节：{}\n章节清单：{}\n现有全文（仅供理解上下文，禁止整篇输出）：{old}",
             serde_json::to_string(project.artifacts.get("revision_request").unwrap_or(&empty_request))?,
-            serde_json::to_string(revision_request.get("affected_sections").unwrap_or(&json!([])))?,
+            serde_json::to_string(project.artifact("revision_plan").and_then(|plan|plan.get("affected_sections")).unwrap_or(&json!([])))?,
             serde_json::to_string(&headings)?,
         );
         let result=self.agents.run(AgentTask::DocumentPatch,project,instruction,feedback).await?;
@@ -185,7 +226,7 @@ impl Workflow {
         );
         let result=self.agents.run(AgentTask::InteractionSupplement,project,instruction,feedback).await?;
         let supplement:crate::domain::InteractionSupplement=serde_json::from_value(result.clone())?;
-        let merged=merge_supplement(&document,&supplement.markdown);
+        let merged=replace_supplement(&document,&supplement.markdown);
         self.ensure_size(&merged)?;
         self.save(project,"document",json!({"markdown":merged}),"resources",feedback)?;
         self.repo.save_artifact(&project.id,"interaction",json!({"completed":true}),"")?;
@@ -264,7 +305,12 @@ owner 归属标准：正文措辞/数值/引用/表格类矛盾归 writer（可�
         let review:crate::domain::Review=serde_json::from_value(result.clone())?;
         if !review.approved && review.findings.is_empty() { return Err(AppError::Workflow("审核拒绝但未给出可修订问题，未自动通过".into())); }
         self.save(project,"review",result,"review",feedback)?;
-        if review.approved { self.repo.update(&project.id,Some("approved"),None,Some(None),None,None)?; }
+        if review.approved {
+            // 同时落上审核产物的 approved 标记：导出门禁读取的是该标记，
+            // 此前只改状态导致已通过的项目永远无法导出。
+            self.repo.approve(&project.id,"review")?;
+            self.repo.update(&project.id,Some("approved"),None,Some(None),None,None)?;
+        }
         else if project.review_round>=MAX_REVIEW_ROUNDS { self.repo.update(&project.id,Some("needs_human"),None,Some(Some("自动修订已达 3 轮，审核仍未通过；请人工处理或明确继续。".into())),None,None)?; }
         Ok(())
     }
@@ -327,7 +373,7 @@ owner 归属标准：正文措辞/数值/引用/表格类矛盾归 writer（可�
         let expected=match stage { "research"=>"research_review","framework"=>"framework_review","revision_plan"=>"revision_review",_=>return Err(AppError::Workflow("该阶段不支持反馈修改".into())) };
         if project.status!=expected { return Err(AppError::Workflow("当前状态不接受此阶段反馈".into())); }
         if let Some(content)=&request.content {
-            let value:Value=serde_json::from_str(content)?;
+            let value:Value=serde_json::from_str(content).map_err(|error|AppError::Invalid(format!("JSON 格式错误：{error}")))?;
             self.save(&project,stage,value,expected,&request.feedback)?;
             return self.repo.require(project_id);
         }
@@ -354,6 +400,9 @@ owner 归属标准：正文措辞/数值/引用/表格类矛盾归 writer（可�
     pub fn start_revision(&self, project_id: &str, request: &RevisionRequest) -> Result<()> {
         let project=self.repo.require(project_id)?;
         if project.running() { return Err(AppError::Workflow("任务运行时不能发起修改".into())); }
+        if project.artifacts.get("project_type").and_then(Value::as_str)==Some("document_review") {
+            return Err(AppError::Workflow("审核文档项目不支持五角色修订流程；请在文档预览中修改原文后重新结构审核".into()));
+        }
         if project.artifact("document").is_none() { return Err(AppError::Workflow("尚无可修改的正文".into())); }
         let mut artifacts=project.artifacts.clone();
         artifacts["revision_request"]=serde_json::to_value(request)?;
@@ -377,7 +426,8 @@ owner 归属标准：正文措辞/数值/引用/表格类矛盾归 writer（可�
         let next_status=if audit_type {"audit_ready"} else if project.artifact("document").is_some(){"resources"}else{&project.status};
         self.save(&project,"document",json!({"markdown":content}),next_status,"")?;
         if audit_type { self.repo.event(project_id,"edit","导入文档已修改；可重新进行结构审核")?; }
-        self.repo.event(project_id,"edit","用户手动保存正文；需重新整理资源并审核")
+        else { self.repo.event(project_id,"edit","用户手动保存正文；需重新整理资源并审核")?; }
+        Ok(())
     }
 }
 
@@ -427,6 +477,9 @@ fn section_end(markdown: &str, scan_from: usize, level: usize) -> usize {
 /// 把交互补充章节合并进正文：优先插入到资源附录之前，否则追加到文末。
 fn merge_supplement(document: &str, supplement: &str) -> String {
     let supplement=supplement.trim();
+    if document.starts_with("## 附录：功能与制作资源拆解") { return format!("{supplement}
+
+{document}"); }
     if let Some(idx)=document.find("\n## 附录：功能与制作资源拆解") {
         format!("{}\n\n{}\n{}", &document[..idx], supplement, &document[idx+1..])
     } else {
@@ -559,7 +612,7 @@ fn find_section_fuzzy(markdown: &str, heading: &str) -> Option<(usize,usize,usiz
             let hashes=trimmed.chars().take_while(|&c|c=='#').count();
             let title=trimmed[hashes..].trim();
             let hay=normalized_heading(title);
-            if hay.contains(&needle)||needle.contains(&hay) {
+            if !hay.is_empty() && (hay.contains(&needle)||needle.contains(&hay)) {
                 return Some((offset,offset+line.len(),hashes));
             }
         }
@@ -590,6 +643,25 @@ mod tests {
         assert_eq!(warnings.len(),1);
         assert!(out.contains("补丁内容"));
         assert!(out.find("补丁内容").unwrap()<out.find("附录").unwrap());
+    }
+
+    #[test]
+    fn degenerate_empty_heading_never_fuzzy_matches() {
+        // 文档里出现孤立的 "##" 行时，归一化标题为空串；
+        // 空串包含匹配会让任意补丁命中该行并吞掉整段文档。
+        let doc="# T
+
+##
+
+正文A
+
+## B
+
+正文B
+";
+        assert!(find_section_fuzzy(doc,"完全无关的补丁标题").is_none());
+        // 正常标题仍可模糊定位
+        assert!(find_section_fuzzy(doc,"B").is_some());
     }
 
     #[test]

@@ -61,8 +61,34 @@ impl Repository {
     }
 
     pub fn update(&self, project_id: &str, status: Option<&str>, artifacts: Option<Value>, error: Option<Option<String>>, revision: Option<u32>, review_round: Option<u32>) -> Result<()> {
-        let project = self.require(project_id)?;
-        self.connection.lock().execute("UPDATE projects SET status=?2,artifacts=?3,error=?4,revision=?5,review_round=?6,updated_at=?7 WHERE id=?1", params![project_id, status.unwrap_or(&project.status), artifacts.map(|v|v.to_string()).unwrap_or_else(||project.artifacts.to_string()), error.unwrap_or(project.error), revision.unwrap_or(project.revision), review_round.unwrap_or(project.review_round), now()])?;
+        // Single atomic statement: a read-modify-write here could clobber a
+        // concurrent save_artifact between the read and the write.
+        self.connection.lock().execute(
+            "UPDATE projects SET status=COALESCE(?2,status),artifacts=COALESCE(?3,artifacts),error=CASE WHEN ?4 THEN ?5 ELSE error END,revision=COALESCE(?6,revision),review_round=COALESCE(?7,review_round),updated_at=?8 WHERE id=?1",
+            params![project_id, status, artifacts.map(|v|v.to_string()), error.is_some(), error.flatten(), revision, review_round, now()],
+        )?;
+        Ok(())
+    }
+
+    /// Atomically claim a project for a stage run. Returns false if the
+    /// project is already running (or was claimed in between), closing the
+    /// check-then-act race that previously allowed two concurrent stages.
+    pub fn claim_running(&self, project_id: &str, stage: &str) -> Result<bool> {
+        let changed=self.connection.lock().execute(
+            "UPDATE projects SET status=?2,error=NULL,updated_at=?3 WHERE id=?1 AND status NOT LIKE 'running:%'",
+            params![project_id, format!("running:{stage}"), now()],
+        )?;
+        Ok(changed==1)
+    }
+
+    pub fn delete_project(&self, project_id: &str) -> Result<()> {
+        let db=self.connection.lock();
+        db.execute("DELETE FROM versions WHERE project_id=?1",[project_id])?;
+        db.execute("DELETE FROM runs WHERE project_id=?1",[project_id])?;
+        db.execute("DELETE FROM events WHERE project_id=?1",[project_id])?;
+        db.execute("DELETE FROM evidence WHERE project_id=?1",[project_id])?;
+        db.execute("DELETE FROM assets WHERE project_id=?1",[project_id])?;
+        db.execute("DELETE FROM projects WHERE id=?1",[project_id])?;
         Ok(())
     }
 
@@ -79,11 +105,15 @@ impl Repository {
     }
 
     pub fn approve(&self, project_id: &str, stage: &str) -> Result<()> {
-        let project = self.require(project_id)?;
-        if project.artifacts.get(stage).is_none() { return Err(AppError::Invalid("当前阶段尚无产物".into())); }
-        let mut artifacts = project.artifacts;
-        artifacts[stage]["approved"] = json!(true);
-        self.update(project_id, None, Some(artifacts), Some(None), None, None)
+        let mut db=self.connection.lock();
+        let tx=db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let artifacts:String=tx.query_row("SELECT artifacts FROM projects WHERE id=?1",[project_id],|row|row.get(0))?;
+        let mut artifacts:Value=serde_json::from_str(&artifacts)?;
+        if artifacts.get(stage).is_none() { return Err(AppError::Invalid("当前阶段尚无产物".into())); }
+        artifacts[stage]["approved"]=json!(true);
+        tx.execute("UPDATE projects SET artifacts=?2,updated_at=?3 WHERE id=?1",params![project_id,artifacts.to_string(),now()])?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn versions(&self, project_id: &str, limit: usize, offset: usize) -> Result<Vec<Value>> {

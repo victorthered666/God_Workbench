@@ -61,3 +61,55 @@ async fn document_audit_import_report_and_reaudit() {
     assert!(exported["docx"].as_str().unwrap().ends_with(".docx"));
     assert!(std::path::Path::new(exported["zip"].as_str().unwrap()).is_file());
 }
+
+/// 审核通过必须落上 review 产物的 approved 标记，否则导出门禁永远拒绝。
+#[tokio::test]
+async fn approved_review_sets_export_gate_flag() {
+    use async_trait::async_trait;
+    use gdd_harness::agent::runtime::AgentTask;
+    struct ReviewPass;
+    #[async_trait]
+    impl AgentExecutor for ReviewPass {
+        async fn run(&self, task: AgentTask, _project: &Project, _instruction: String, _feedback: &str) -> gdd_harness::Result<Value> {
+            Ok(match task { AgentTask::Review=>json!({"approved":true,"findings":[],"summary":"通过"}), _=>json!({"summary":"无"}) })
+        }
+        async fn annotate(&self, _project: &Project, _path: &str, _title: &str) -> gdd_harness::Result<Vec<Annotation>> { Ok(vec![]) }
+    }
+    let dir=tempfile::tempdir().unwrap();
+    let config=Config::with_dirs(env!("CARGO_MANIFEST_DIR"),dir.path(),dir.path().join("outputs"),8766);
+    config.init().unwrap();
+    let repo=Repository::new(dir.path().join("gate.db")).unwrap();
+    let workflow=Workflow::new(repo.clone(),Arc::new(ReviewPass),config);
+    let project=workflow.create(&gdd_harness::domain::ProjectCreate{name:"导出门禁".into(),purpose:"p".into(),references:"r".into(),platform:String::new(),audience:String::new()}).unwrap();
+    repo.save_artifact(&project.id,"document",json!({"markdown":"# d"}),"").unwrap();
+    repo.save_artifact(&project.id,"framework",json!({"title":"t","summary":"s","sections":[]}),"").unwrap();
+    repo.update(&project.id,Some("review"),None,None,None,None).unwrap();
+    workflow.execute(&project.id,"review","").await.unwrap();
+    let done=repo.require(&project.id).unwrap();
+    assert_eq!(done.status,"approved");
+    assert!(done.approved("review"),"review artifact gate flag must be true after approval");
+}
+
+/// 项目类型门禁：审核文档项目不可运行五角色阶段，普通项目不可运行 audit。
+#[tokio::test]
+async fn project_type_gates_stages() {
+    struct NoCall;
+    #[async_trait]
+    impl AgentExecutor for NoCall {
+        async fn run(&self, _task: AgentTask, _project: &Project, _instruction: String, _feedback: &str) -> gdd_harness::Result<Value> { unreachable!("should be gated before any model call") }
+        async fn annotate(&self, _project: &Project, _path: &str, _title: &str) -> gdd_harness::Result<Vec<Annotation>> { Ok(vec![]) }
+    }
+    let dir=tempfile::tempdir().unwrap();
+    let config=Config::with_dirs(env!("CARGO_MANIFEST_DIR"),dir.path(),dir.path().join("outputs"),8766);
+    config.init().unwrap();
+    let repo=Repository::new(dir.path().join("gate2.db")).unwrap();
+    let workflow=Workflow::new(repo.clone(),Arc::new(NoCall),config.clone());
+    let audit_project=workflow.create_audit(&ProjectAuditCreate{name:"类型门禁".into(),markdown:"# d".into(),platform:String::new(),audience:String::new()}).unwrap();
+    let err=workflow.execute(&audit_project.id,"resources","").await.unwrap_err();
+    assert!(err.to_string().contains("只能执行结构审核"),"{err}");
+    let err=workflow.execute(&audit_project.id,"research","").await.unwrap_err();
+    assert!(err.to_string().contains("只能执行结构审核"),"{err}");
+    let normal=workflow.create(&gdd_harness::domain::ProjectCreate{name:"普通".into(),purpose:"p".into(),references:"r".into(),platform:String::new(),audience:String::new()}).unwrap();
+    let err=workflow.execute(&normal.id,"audit","").await.unwrap_err();
+    assert!(err.to_string().contains("仅适用于审核文档项目"),"{err}");
+}

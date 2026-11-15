@@ -4,6 +4,12 @@ use crate::{AppError, Result};
 pub fn safe_name(name: &str) -> String {
     let mut result: String = name.chars().filter(|c| !c.is_control()).map(|c| if matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') { '_' } else { c }).collect();
     result = result.trim_matches(|c: char| c == ' ' || c == '.').chars().take(90).collect();
+    // Windows 保留设备名（CON/PRN/AUX/NUL/COM1…LPT9）整名做文件会指向设备。
+    let upper=result.split(|c: char| c=='.'||c==' ').next().unwrap_or("").to_ascii_uppercase();
+    if matches!(upper.as_str(),"CON"|"PRN"|"AUX"|"NUL")
+        || (upper.len()==4 && (upper.starts_with("COM")||upper.starts_with("LPT")) && upper[3..4].chars().all(|c| c.is_ascii_digit())) {
+        result=format!("文档-{result}");
+    }
     if result.is_empty() { "未命名策划文档".into() } else { result }
 }
 

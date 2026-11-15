@@ -1,4 +1,5 @@
 use std::{fs::File, io::{BufWriter, Read, Write}, path::{Path, PathBuf}};
+const CHR_BACKSLASH: char = char::from_u32(92).unwrap();
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use crate::{domain::{now, Project}, paths::{contained_file, safe_name}, repository::Repository, AppError, Result};
@@ -36,17 +37,22 @@ pub fn export(repo: &Repository, project: &Project) -> Result<Value> {
     if files.len()>10_000 || files.iter().try_fold(0u64,|sum,path|sum.checked_add(path.metadata().ok()?.len())).is_none_or(|total|total>2*1024*1024*1024) {
         return Err(AppError::Invalid("归档文件数量或总大小超过安全限制".into()));
     }
+    // 一次哈希，两处复用：清单与 ZIP 内容保证一致，也避免读两遍大文件。
+    let mut hashed:Vec<(std::path::PathBuf,String,u64)>=Vec::with_capacity(files.len());
     for path in &files {
-        let relative=path.strip_prefix(&root).unwrap().to_string_lossy().replace('\\',"/");
-        manifest["files"].as_array_mut().unwrap().push(json!({"path":relative,"sha256":hash_file(path)?,"bytes":path.metadata()?.len()}));
+        let relative=path.strip_prefix(&root).unwrap().to_string_lossy().replace(CHR_BACKSLASH,"/");
+        let sha256=hash_file(path)?;
+        let bytes=path.metadata()?.len();
+        manifest["files"].as_array_mut().unwrap().push(json!({"path":relative,"sha256":sha256,"bytes":bytes}));
+        hashed.push((path.clone(),sha256,bytes));
     }
     std::fs::write(root.join("manifest.json"),serde_json::to_string_pretty(&manifest)?)?;
     let zip_path=root.join(format!("{title}-v{}.zip",project.revision));
     let temp=root.join(format!("{title}.tmp.zip"));
     let mut archive=zip::ZipWriter::new(BufWriter::new(File::create(&temp)?));
     let options=zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-    for path in project_files(&root)? {
-        let relative=path.strip_prefix(&root).unwrap().to_string_lossy().replace('\\',"/");
+    for (path,_sha256,_bytes) in &hashed {
+        let relative=path.strip_prefix(&root).unwrap().to_string_lossy().replace(CHR_BACKSLASH,"/");
         archive.start_file(format!("{title}/{relative}"),options).map_err(|error|AppError::Other(error.to_string()))?;
         std::io::copy(&mut File::open(path)?,&mut archive)?;
     }
