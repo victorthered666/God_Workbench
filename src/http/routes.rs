@@ -112,7 +112,11 @@ async fn acknowledge_review(State(state): State<AppState>, Path(id): Path<String
         return Err(AppError::Workflow("当前没有需要人工知悉的架构类问题".into()));
     }
     let mut artifacts=project.artifacts.clone();
+    let deferred:Vec<Value>=review.findings.iter()
+        .filter(|f|matches!(f.owner,Role::Research|Role::Architect))
+        .map(|f|serde_json::to_value(f).unwrap_or(json!({}))).collect();
     artifacts["review_acknowledged"]=json!(true);
+    artifacts["deferred_findings"]=json!(deferred);
     state.repo.update(&id,Some("review"),Some(artifacts),Some(None),None,None)?;
     state.repo.event(&id,"gate","用户人工知悉架构类审核问题；继续修订其余问题")?;
     state.runner.start(id,"revise".into(),String::new())?;

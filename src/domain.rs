@@ -176,23 +176,32 @@ pub struct ImpactPlan {
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Review {
+    #[serde(default)]
     pub approved: bool,
     #[serde(default)] pub findings: Vec<ReviewFinding>,
-    #[serde(deserialize_with = "flex::string_or_sequence")] pub summary: String,
+    #[serde(default, deserialize_with = "flex::string_or_sequence")] pub summary: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ReviewFinding {
-    pub section: String,
-    #[serde(deserialize_with = "flex::string_or_sequence")] pub problem: String,
-    pub severity: Severity,
-    pub owner: Role,
-    #[serde(deserialize_with = "flex::string_or_sequence")] pub recommendation: String,
+    #[serde(default, deserialize_with = "flex::string_or_sequence")] pub section: String,
+    #[serde(default, deserialize_with = "flex::string_or_sequence")] pub problem: String,
+    #[serde(default)] pub severity: Severity,
+    /// 模型偶尔漏填 owner；默认 writer（绝大多数发现在正文层面可修）。
+    #[serde(default = "default_finding_owner")] pub owner: Role,
+    #[serde(default, deserialize_with = "flex::string_or_sequence")] pub recommendation: String,
 }
+fn default_finding_owner() -> Role { Role::Writer }
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
-pub enum Severity { Low, Medium, High }
+pub enum Severity {
+    Low,
+    #[default]
+    Medium,
+    High,
+}
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]

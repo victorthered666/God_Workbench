@@ -100,7 +100,7 @@ impl Workflow {
 
     async fn framework(&self, project: &Project, feedback: &str) -> Result<()> {
         if !project.approved("research") { return Err(AppError::Workflow("调研意见尚未由用户确认".into())); }
-        let instruction=format!("根据用户已确认的调研意见形成可执行 GDD 框架。\n{}\n修改影响计划（如有）：{}\n章节 id 使用稳定英文短横线格式，输出 Framework JSON。",project.artifact("research").unwrap_or(&json!({})),project.artifact("revision_plan").unwrap_or(&json!({})));
+        let instruction=format!("根据用户已确认的调研意见形成可执行 GDD 框架。\n{}\n修改影响计划（如有）：{}\n章节 id 使用稳定英文短横线格式，输出 Framework JSON。框架自检清单（输出前逐项确认，任何一条不满足就先修正）：1) 同一机制的规则与数值在多处描述不得自相矛盾；2) 引用的章节/表号/小节必须真实存在；3) 数值上限或保护规则不得与具体动作的无敌帧/霸体等既有设定冲突；4) 互斥条件必须真实成立；5) 每条验收标准可测试、可执行。",project.artifact("research").unwrap_or(&json!({})),project.artifact("revision_plan").unwrap_or(&json!({})));
         let result=self.agents.run(AgentTask::Framework,project,instruction,feedback).await?;
         self.save(project,"framework",result,"framework_review",feedback)
     }
@@ -196,6 +196,18 @@ impl Workflow {
         let evidence_json=serde_json::to_string(&self.repo.evidence_list(&project.id,100)?)?;
         let evidence=crate::paths::truncate_utf8(&evidence_json,20000);
         let instruction=format!("独立审核完整 GDD。检查目标一致性、框架覆盖、规则闭环、交互状态、图文引用、来源可追溯与资源清单。只报告有正文证据的问题；若可通过，approved=true 且 findings 为空。输出 Review JSON。\n输出纪律：findings 合并同类问题，最多 15 条，按严重程度排序；每条 problem/recommendation 各不超过 100 字；相同章节多个小问题合并为一条。\n已确认框架：{}\n文档：{}\n证据索引：{}",project.artifact("framework").unwrap_or(&json!({})),document,evidence);
+        let acknowledged=project.artifacts.get("review_acknowledged").and_then(Value::as_bool).unwrap_or(false);
+        let deferred=project.artifacts.get("deferred_findings").cloned().unwrap_or(json!([]));
+        let mut extra=String::from("
+owner 归属标准：正文措辞/数值/引用/表格类矛盾归 writer（可在文档内直接修正）；交互规格问题归 interaction；资源清单问题归 producer；调研事实错误归 research；仅当修复必须推翻已确认框架的结构或设计目标时才归 architect。");
+        if acknowledged {
+            let deferred_list=deferred.as_array().cloned().unwrap_or_default();
+            if !deferred_list.is_empty() {
+                extra.push_str(&format!("
+以下问题已经用户人工知悉暂缓，不要重复报告；仅当正文变更使其不再成立时才需提及：{}",serde_json::to_string(&deferred_list)?));
+            }
+        }
+        let instruction=format!("{instruction}{extra}");
         let result=match self.agents.run(AgentTask::Review,project,instruction.clone(),feedback).await {
             Ok(result)=>result,
             Err(AppError::OutputTruncated)=>{
@@ -222,6 +234,10 @@ impl Workflow {
         let architecture_findings=review.findings.iter().any(|f|matches!(f.owner,Role::Research|Role::Architect));
         if architecture_findings && !acknowledged {
             return Err(AppError::Workflow("问题涉及调研或架构，请人工调整已确认意见/框架；若决定带病继续，可点击「架构类问题已人工知悉」跳过此类问题修订其余项".into()));
+        }
+        if acknowledged {
+            let processable=review.findings.iter().any(|f|matches!(f.owner,Role::Writer|Role::Interaction|Role::Producer));
+            if !processable { return Err(AppError::Workflow("本轮剩余问题均为架构/调研类新问题，需人工决策；请调整框架或修改正文后重试".into())); }
         }
         let mut document=self.bounded_document(project)?;
         for role in [Role::Writer,Role::Interaction,Role::Producer] {
@@ -300,6 +316,7 @@ impl Workflow {
             if let Some(artifact)=artifacts.get_mut(stage) { artifact["approved"]=json!(false); }
         }
         artifacts["review_acknowledged"]=json!(false);
+        artifacts["deferred_findings"]=json!([]);
         self.repo.update(project_id,Some("revision_planning"),Some(artifacts),Some(None),Some(project.revision+1),Some(0))?;
         self.repo.save_artifact(project_id,"revision_request",serde_json::to_value(request)?,"")?;
         Ok(())
