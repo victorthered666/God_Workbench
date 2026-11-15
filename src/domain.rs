@@ -174,7 +174,7 @@ pub struct ImpactPlan {
     #[serde(default)] pub preserved_sections: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct Review {
     #[serde(default)]
     pub approved: bool,

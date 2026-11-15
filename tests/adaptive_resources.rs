@@ -41,7 +41,9 @@ async fn truncated_resource_chunk_is_split_and_merged() {
     let plan:gdd_harness::domain::ResourcePlan=serde_json::from_value(finished.artifact("resources").unwrap().clone()).unwrap();
     let names:Vec<&str>=plan.features.iter().map(|item|item.name.as_str()).collect();
     assert!(names.contains(&"甲块资源") && names.contains(&"乙块资源"),"both halves should contribute, got {names:?}");
-    assert_eq!(plan.features[0].id,"F-001");
+    // 模型返回 F-999 时同名沿用 F-999；无 ID 资源分配未占用新 ID
+    assert_eq!(plan.features[0].id,"F-999");
+    assert!(plan.features[1].id.starts_with("F-"));
     assert!(finished.artifact("document").unwrap().get("markdown").unwrap().as_str().unwrap().contains("附录：功能与制作资源拆解"));
 }
 

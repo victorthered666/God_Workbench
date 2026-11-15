@@ -304,6 +304,25 @@ owner 归属标准：正文措辞/数值/引用/表格类矛盾归 writer（可�
         };
         let review:crate::domain::Review=serde_json::from_value(result.clone())?;
         if !review.approved && review.findings.is_empty() { return Err(AppError::Workflow("审核拒绝但未给出可修订问题，未自动通过".into())); }
+        // 收敛性通过规则：对长文档「零发现才通过」不可达——审核每轮都能
+        // 挖出全新中低级问题。当连续修订已被证实有效（本轮无任何上轮
+        // 问题重复、无 high 问题、且已完成至少 2 轮修订）时按收敛通过，
+        // 剩余中低级问题降级为不阻塞的建议项，全部保留在审核产物中。
+        let mut review=review;
+        if !review.approved && !review.findings.is_empty() && project.review_round>=2 {
+            let has_high=review.findings.iter().any(|f|matches!(f.severity,crate::domain::Severity::High));
+            let finding_key=|f:&crate::domain::ReviewFinding| format!("{}|{}",f.section.trim(),f.problem.trim());
+            let current:std::collections::HashSet<String>=review.findings.iter().map(|f|finding_key(f)).collect();
+            let mut previous_review=serde_json::from_value::<crate::domain::Review>(project.artifact("review").cloned().unwrap_or(json!({}))).unwrap_or_default();
+            let repeats=previous_review.findings.iter().filter(|f|current.contains(&finding_key(f))).count();
+            if !has_high && repeats==0 {
+                self.repo.event(&project.id,"gate","收敛性通过：本轮无高危问题且无上轮重复问题；剩余发现降级为建议项")?;
+                review.summary=format!("【按收敛规则通过；以下为不阻塞的建议项】
+{}",review.summary);
+                review.approved=true;
+            }
+        }
+        let result=serde_json::to_value(&review)?;
         self.save(project,"review",result,"review",feedback)?;
         if review.approved {
             // 同时落上审核产物的 approved 标记：导出门禁读取的是该标记，
@@ -348,8 +367,9 @@ owner 归属标准：正文措辞/数值/引用/表格类矛盾归 writer（可�
             } else if role==Role::Writer {
                 // Patch mode: only output replaced sections, never the whole document.
                 let headings=extract_headings(&document);
+                let hotspot_sections:Vec<String>=findings.iter().map(|finding|finding.section.split_whitespace().next().unwrap_or(finding.section.as_str()).to_string()).collect();
                 let instruction=format!(
-                    "仅修复以下审核问题。只输出 DocumentPatches JSON：patches 数组，每项 {{heading, markdown}}；heading 逐字取自下方章节清单，markdown 为该章节完整替换内容。未受影响章节不要输出。清单中没有对应章节时，把修改内容并入清单中最相关章节的补丁，不要发明新标题。\n问题：{findings_json}\n章节清单：{}\n现有全文：{document}",
+                    "仅修复以下审核问题。只输出 DocumentPatches JSON：patches 数组，每项 {{heading, markdown}}；heading 逐字取自下方章节清单，markdown 为该章节完整替换内容。未受影响章节不要输出。清单中没有对应章节时，把修改内容并入清单中最相关章节的补丁，不要发明新标题。\n数值自查纪律（强制）：修改任何数值、公式、消耗或收益定义后，必须重读所在章节全部相关数值并保证相互自洽；不得引入未定义的量、区间或基准；热点章节（{hotspot_sections:?}）必须整段通读自查后再输出补丁，不允许只改被点名的那一句。\n问题：{findings_json}\n章节清单：{}\n现有全文：{document}",
                     serde_json::to_string(&headings)?
                 );
                 let result=self.agents.run(AgentTask::DocumentPatch,project,instruction,feedback).await?;
@@ -584,21 +604,34 @@ fn split_chunk_in_half(chunk: &str) -> Option<(String,String)> {
 
 /// 合并各批提取结果：按（名称+来源章节）去重，再按类别重新编号保证 ID 唯一。
 fn dedupe_and_renumber(plan: &mut crate::domain::ResourcePlan) {
-    fn dedupe(items: Vec<crate::domain::ResourceItem>, prefix: &str) -> Vec<crate::domain::ResourceItem> {
-        let mut seen=std::collections::HashSet::new();
+    // ID 稳定策略：同名资源沿用上一版 ID（资源名是跨版本自然键）；
+    // 仅对真正新增的资源分配未占用新 ID。此前每轮全部重编 F-001…F-N，
+    // 正文里上一版写入的 F-xxx 引用立刻全部失效，审核→修订→重拆解因此
+    // 永远无法收敛（实测 12 轮反复出现引用错配类发现）。
+    fn dedupe(items: Vec<crate::domain::ResourceItem>, prefix: &str, next_serial: &mut u16) -> Vec<crate::domain::ResourceItem> {
+        let mut seen_names=std::collections::HashSet::new();
         let mut result=Vec::new();
-        for mut item in items {
+        for item in items {
             let key=(item.name.trim().to_string(),item.source_section.trim().to_string());
-            if !seen.insert(key) { continue; }
-            item.id=String::new();
+            if !seen_names.insert(key) { continue; }
             result.push(item);
         }
-        for (index,item) in result.iter_mut().enumerate() { item.id=format!("{prefix}-{:03}",index+1); }
+        let mut used:std::collections::HashSet<String>=result.iter().map(|item|item.id.trim().to_string()).filter(|id|!id.is_empty()).collect();
+        for item in result.iter_mut() {
+            if item.id.trim().is_empty() {
+                loop {
+                    *next_serial+=1;
+                    let candidate=format!("{prefix}-{next_serial:03}");
+                    if used.insert(candidate.clone()) { item.id=candidate; break; }
+                }
+            }
+        }
         result
     }
-    plan.features=dedupe(std::mem::take(&mut plan.features),"F");
-    plan.art=dedupe(std::mem::take(&mut plan.art),"A");
-    plan.audio=dedupe(std::mem::take(&mut plan.audio),"S");
+    let mut f_serial=0; let mut a_serial=0; let mut s_serial=0;
+    plan.features=dedupe(std::mem::take(&mut plan.features),"F",&mut f_serial);
+    plan.art=dedupe(std::mem::take(&mut plan.art),"A",&mut a_serial);
+    plan.audio=dedupe(std::mem::take(&mut plan.audio),"S",&mut s_serial);
 }
 
 /// 应用章节补丁：精确/模糊定位章节并整段替换；
@@ -761,12 +794,13 @@ mod tests {
         use crate::domain::{ResourceItem,ResourcePlan};
         let item=|id:&str,name:&str,section:&str| ResourceItem{id:id.into(),name:name.into(),specification:"s".into(),source_section:section.into(),dependencies:"".into(),priority:crate::domain::Priority::P1,acceptance:"a".into()};
         let mut plan=ResourcePlan{
-            features:vec![item("F-001","采集","核心循环"),item("F-002","采集","核心循环"),item("F-003","制作","核心循环")],
+            features:vec![item("F-007","采集","核心循环"),item("F-002","采集","核心循环"),item("","制作","核心循环")],
             art:vec![item("A-009","采集界面","交互")],
             audio:vec![],
         };
         dedupe_and_renumber(&mut plan);
-        assert_eq!(plan.features.iter().map(|i|i.id.as_str()).collect::<Vec<_>>(),vec!["F-001","F-002"]);
-        assert_eq!(plan.art[0].id,"A-001");
+        // 同名沿用已有 ID，新增项获得未占用 ID，绝不整体重编
+        assert_eq!(plan.features.iter().map(|i|i.id.as_str()).collect::<Vec<_>>(),vec!["F-007","F-001"]);
+        assert_eq!(plan.art[0].id,"A-009");
     }
 }
