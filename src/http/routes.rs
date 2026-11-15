@@ -181,7 +181,7 @@ async fn download(State(state): State<AppState>, Path((id,kind)): Path<(String,S
     let audit_type=project.artifacts.get("project_type").and_then(Value::as_str)==Some("document_review");
     if project.status!="approved" && !(audit_type && project.status=="audit_done") { return Err(AppError::Workflow("审核通过并导出后才能下载".into())); }
     let title=safe_name(&project.name);
-    let filename=match kind.as_str() { "markdown"=>format!("{title}.md"),"docx"=>format!("{title}.docx"),"zip"=>format!("{title}-v{}.zip",project.revision),_=>return Err(AppError::Invalid("未知下载格式".into())) };
+    let filename=match kind.as_str() { "markdown"=>format!("{title}.md"),"docx"=>format!("{title}.docx"),"html"=>format!("{title}.html"),"zip"=>format!("{title}-v{}.zip",project.revision),_=>return Err(AppError::Invalid("未知下载格式".into())) };
     let path=project.working_dir()?.join(&filename);
     if !path.is_file() { return Err(AppError::Invalid("请先生成导出包".into())); }
     let disposition=header::HeaderValue::from_str(&format!("attachment; filename=\"{}\"",filename)).map_err(|_|AppError::Invalid("下载文件名无效".into()))?;

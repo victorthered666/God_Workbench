@@ -20,8 +20,10 @@ pub fn export(repo: &Repository, project: &Project) -> Result<Value> {
     for path in image_paths(markdown) { contained_file(&root,&path)?; }
     let md_path=root.join(format!("{title}.md"));
     let docx_path=root.join(format!("{title}.docx"));
+    let html_path=root.join(format!("{title}.html"));
     std::fs::write(&md_path,markdown)?;
     render(project,&docx_path)?;
+    std::fs::write(&html_path,super::html::render(project,&title,markdown)?)?;
     if let Some(artifacts)=project.artifacts.as_object() {
         for (stage,artifact) in artifacts {
             if artifact.get("content").is_some() {
@@ -32,7 +34,7 @@ pub fn export(repo: &Repository, project: &Project) -> Result<Value> {
     }
     std::fs::write(root.join("research/evidence.json"),serde_json::to_string_pretty(&repo.evidence_list(&project.id,100_000)?)?)?;
     std::fs::write(root.join("reviews/history.json"),serde_json::to_string_pretty(&repo.versions(&project.id,100_000,0)?)?)?;
-    let mut manifest=json!({"name":title,"project_id":project.id,"revision":project.revision,"created_at":project.created_at,"exported_at":now(),"approval":project.artifact("review"),"documents":[md_path.file_name().unwrap().to_string_lossy(),docx_path.file_name().unwrap().to_string_lossy()],"assets":repo.assets(&project.id)?,"notice":"网络图片仅用于研究参考，可检索不代表取得再发布授权。本文档不包含 API Key。","files":[]});
+    let mut manifest=json!({"name":title,"project_id":project.id,"revision":project.revision,"created_at":project.created_at,"exported_at":now(),"approval":project.artifact("review"),"documents":[md_path.file_name().unwrap().to_string_lossy(),docx_path.file_name().unwrap().to_string_lossy(),html_path.file_name().unwrap().to_string_lossy()],"assets":repo.assets(&project.id)?,"notice":"网络图片仅用于研究参考，可检索不代表取得再发布授权。本文档不包含 API Key。","files":[]});
     let files=project_files(&root)?;
     if files.len()>10_000 || files.iter().try_fold(0u64,|sum,path|sum.checked_add(path.metadata().ok()?.len())).is_none_or(|total|total>2*1024*1024*1024) {
         return Err(AppError::Invalid("归档文件数量或总大小超过安全限制".into()));
@@ -58,7 +60,7 @@ pub fn export(repo: &Repository, project: &Project) -> Result<Value> {
     }
     archive.finish().map_err(|error|AppError::Other(error.to_string()))?;
     std::fs::rename(&temp,&zip_path)?;
-    Ok(json!({"directory":root,"markdown":md_path,"docx":docx_path,"zip":zip_path}))
+    Ok(json!({"directory":root,"markdown":md_path,"docx":docx_path,"html":html_path,"zip":zip_path}))
 }
 
 fn image_paths(markdown: &str) -> Vec<String> {
