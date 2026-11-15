@@ -31,6 +31,7 @@ pub fn app(repo: Repository, secrets: SecretStore, workflow: Workflow, runner: R
         .route("/api/projects/{id}/revision",post(revision))
         .route("/api/projects/{id}/autorun",put(autorun))
         .route("/api/projects/{id}/review/acknowledge",post(acknowledge_review))
+        .route("/api/projects/{id}/review/authorize-round",post(authorize_review_round))
         .route("/api/projects/{id}/document",put(edit_document))
         .route("/api/projects/{id}/preview",get(preview))
         .route("/api/projects/{id}/asset",get(asset))
@@ -131,6 +132,12 @@ async fn acknowledge_review(State(state): State<AppState>, Path(id): Path<String
     state.repo.event(&id,"gate","用户人工知悉架构类审核问题；继续修订其余问题")?;
     state.runner.start(id,"revise".into(),String::new())?;
     Ok(Json(json!({"status":"acknowledged"})))
+}
+
+async fn authorize_review_round(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>> {
+    state.workflow.authorize_extra_round(&id)?;
+    state.runner.start(id,"revise".into(),String::new())?;
+    Ok(Json(json!({"status":"authorized"})))
 }
 
 async fn revision(State(state): State<AppState>, Path(id): Path<String>, Json(request): Json<RevisionRequest>) -> Result<Json<Value>> {

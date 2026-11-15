@@ -319,8 +319,12 @@ owner 归属标准：正文措辞/数值/引用/表格类矛盾归 writer（可�
         let review:crate::domain::Review=serde_json::from_value(project.artifact("review").cloned().unwrap_or(json!({})))?;
         if review.approved { return Err(AppError::Workflow("审核已通过，不需要自动修订".into())); }
         let acknowledged=project.artifacts.get("review_acknowledged").and_then(Value::as_bool).unwrap_or(false);
-        // 人工知悉架构类问题后，允许再进行一轮针对性自动修订（每次知悉 = 一次明确授权）。
-        if !acknowledged && project.review_round>=MAX_REVIEW_ROUNDS { return Err(AppError::Workflow("自动修订已达 3 轮，请人工处理".into())); }
+        let extra_authorized=project.artifacts.get("extra_round_authorized").and_then(Value::as_bool).unwrap_or(false);
+        // 三轮上限后的两条人工出口：知悉架构类问题，或明确授权追加一轮；
+        // 每次授权只消费一轮，用完即回到上限。
+        if !acknowledged && !extra_authorized && project.review_round>=MAX_REVIEW_ROUNDS {
+            return Err(AppError::Workflow("自动修订已达 3 轮；请人工修改正文、调整框架，或在页面上明确授权追加一轮修订".into()));
+        }
         let architecture_findings=review.findings.iter().any(|f|matches!(f.owner,Role::Research|Role::Architect));
         if architecture_findings && !acknowledged {
             return Err(AppError::Workflow("问题涉及调研或架构，请人工调整已确认意见/框架；若决定带病继续，可点击「架构类问题已人工知悉」跳过此类问题修订其余项".into()));
@@ -364,7 +368,9 @@ owner 归属标准：正文措辞/数值/引用/表格类矛盾归 writer（可�
         }
         self.repo.save_artifact(&project.id,"document",json!({"markdown":document}),"")?;
         fs::write(project.working_dir()?.join("document.md"),&document)?;
-        self.repo.update(&project.id,None,None,None,None,Some(project.review_round+1))?;
+        let mut artifacts=self.repo.require(&project.id)?.artifacts;
+        artifacts["extra_round_authorized"]=json!(false);
+        self.repo.update(&project.id,None,Some(artifacts),None,None,Some(project.review_round+1))?;
         self.review(&self.repo.require(&project.id)?,feedback).await
     }
 
@@ -395,6 +401,21 @@ owner 归属标准：正文措辞/数值/引用/表格类矛盾归 writer（可�
         if stage=="revision_plan" && next=="framework" { self.repo.approve(project_id,"research")?; }
         self.repo.update(project_id,Some(if next=="document"{"framework_approved"}else{"interrupted"}),None,Some(None),None,None)?;
         Ok(next.into())
+    }
+
+    /// 三轮上限后的「明确继续」：用户每次点击授权且仅授权一轮追加修订。
+    pub fn authorize_extra_round(&self, project_id: &str) -> Result<()> {
+        let project=self.repo.require(project_id)?;
+        if project.running() { return Err(AppError::Workflow("任务运行时不能授权".into())); }
+        if !matches!(project.status.as_str(),"needs_human"|"interrupted") { return Err(AppError::Workflow("当前状态无需人工授权".into())); }
+        let review:crate::domain::Review=serde_json::from_value(project.artifact("review").cloned().ok_or_else(||AppError::Workflow("尚无审核产物".into()))?)?;
+        if review.approved { return Err(AppError::Workflow("审核已通过".into())); }
+        if project.review_round<MAX_REVIEW_ROUNDS { return Err(AppError::Workflow("尚未达到三轮上限，无需人工授权".into())); }
+        let mut artifacts=project.artifacts;
+        artifacts["extra_round_authorized"]=json!(true);
+        self.repo.update(project_id,Some("review"),Some(artifacts),Some(None),None,None)?;
+        self.repo.event(project_id,"gate","用户明确授权追加一轮自动修订")?;
+        Ok(())
     }
 
     pub fn start_revision(&self, project_id: &str, request: &RevisionRequest) -> Result<()> {

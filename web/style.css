@@ -14,3 +14,6 @@
 .audit-report{font-size:13px;line-height:1.9;color:#4d615c}
 .audit-report .finding{border-left:2px solid #96ad9d;padding:5px 18px;margin:12px 0}
 .audit-report .evidence{background:#f0f3ef;border-radius:4px;padding:10px 14px;color:#58716c;font-size:12px;margin-top:6px}
+
+.manual-hint{display:block;margin-top:8px;color:var(--muted);font-size:11px}
+.gate-actions{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:14px}

@@ -40,3 +40,32 @@ async fn three_revisions_stop_for_human_review() {
     assert_eq!(repo.require(&project.id).unwrap().status,"needs_human");
     assert!(workflow.execute(&project.id,"revise","").await.is_err());
 }
+
+/// 三轮上限后：明确授权可再跑一轮，授权只消费一轮。
+#[tokio::test]
+async fn authorize_extra_round_allows_exactly_one_more_revision() {
+    use std::sync::Arc as Arc2;
+    let dir=tempfile::tempdir().unwrap();
+    let config=Config::with_dirs(env!("CARGO_MANIFEST_DIR"),dir.path(),dir.path(),8766);
+    config.init().unwrap();
+    let repo=Repository::new(dir.path().join("extra.db")).unwrap();
+    let workflow=Workflow::new(repo.clone(),Arc2::new(RejectingAgents),config);
+    let project=workflow.create(&gdd_harness::domain::ProjectCreate{name:"追加轮".into(),purpose:"p".into(),references:"r".into(),platform:String::new(),audience:String::new()}).unwrap();
+    repo.save_artifact(&project.id,"document",json!({"markdown":"# 模拟正文"}),"").unwrap();
+    repo.save_artifact(&project.id,"framework",json!({"title":"t","summary":"s","sections":[]}),"").unwrap();
+    repo.update(&project.id,Some("review"),None,None,None,None).unwrap();
+    for _ in 0..3 { workflow.execute(&project.id,"review","").await.unwrap(); workflow.execute(&project.id,"revise","").await.unwrap(); }
+    assert_eq!(repo.require(&project.id).unwrap().status,"needs_human");
+    // 未授权时 revise 被拒
+    let err=workflow.execute(&project.id,"revise","").await.unwrap_err();
+    assert!(err.to_string().contains("明确授权"),"{err}");
+    // 授权后可再跑一轮（第 4 轮）
+    workflow.authorize_extra_round(&project.id).unwrap();
+    workflow.execute(&project.id,"revise","").await.unwrap();
+    assert_eq!(repo.require(&project.id).unwrap().review_round,4);
+    assert_eq!(repo.require(&project.id).unwrap().status,"needs_human");
+    // 授权已被消费：再次 revise 仍被拒
+    let err=workflow.execute(&project.id,"revise","").await.unwrap_err();
+    assert!(err.to_string().contains("明确授权"),"{err}");
+    // needs_human 状态下授权接口本身可用（幂等语义：再授权再跑一轮）
+}
