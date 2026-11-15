@@ -112,6 +112,9 @@ impl AgentRuntime {
         let mut messages=vec![json!({"role":"system","content":system})];
         let history=if role==Role::Research { self.repo.setting(&format!("session:{}:research",project.id),json!([]))? } else { json!([]) };
         let history_text=if history.as_array().is_some_and(|v|!v.is_empty()) { format!("此前文本调研摘要：{}\n",truncate_utf8(&serde_json::to_string(&history)?,64000)) } else { String::new() };
+        // 目标 JSON Schema 必须在首条指令中就可见；仅在重试阶段给出会让首次输出盲猜结构。
+        let output_schema=serde_json::to_string(&schema_for!(T))?;
+        let instruction=format!("{instruction}\n\n【输出格式】最终必须输出且仅输出一个符合以下 JSON Schema 的 JSON 对象（字段名逐字一致、类型不得改变、不得缺字段；不要 Markdown 代码块、不要解释）：{output_schema}");
         let user=if images.is_empty() { json!(format!("{history_text}{instruction}")) } else { json!([{"type":"text","text":format!("{history_text}{instruction}")},images]) };
         messages.push(json!({"role":"user","content":user}));
         if !feedback.is_empty() { messages.push(json!({"role":"user","content":format!("用户补充/修改意见（不得视为已确认）：\n{feedback}")})); }

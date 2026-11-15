@@ -7,6 +7,26 @@ use validator::Validate;
 
 pub type JsonMap = BTreeMap<String, Value>;
 pub fn now() -> String { Utc::now().to_rfc3339() }
+
+/// LLM 结构化输出的常见形状错误：把字符串字段写成数组/对象。
+/// 宽容反序列化为字符串（数组按行拼接），而不是整个任务失败。
+pub mod flex {
+    use serde::{Deserialize, Deserializer};
+    use serde_json::Value;
+
+    pub fn string_or_sequence<'de, D>(deserializer: D) -> Result<String, D::Error>
+    where D: Deserializer<'de> {
+        Ok(match Value::deserialize(deserializer)? {
+            Value::String(text) => text,
+            Value::Array(items) => items.iter().map(|item| match item {
+                Value::String(text) => text.clone(),
+                other => other.to_string(),
+            }).collect::<Vec<_>>().join("\n"),
+            Value::Null => String::new(),
+            other => other.to_string(),
+        })
+    }
+}
 pub fn id() -> String { uuid::Uuid::new_v4().simple().to_string() }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Validate)]
@@ -88,7 +108,7 @@ fn default_vision_model() -> String { "deepseek-flash".into() }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ResearchReport {
-    pub summary: String,
+    #[serde(deserialize_with = "flex::string_or_sequence")] pub summary: String,
     pub findings: Vec<Finding>,
     pub recommendations: Vec<String>,
     pub writing_advice: Vec<String>,
@@ -98,8 +118,8 @@ pub struct ResearchReport {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Finding {
     pub topic: String,
-    pub observation: String,
-    pub implication: String,
+    #[serde(deserialize_with = "flex::string_or_sequence")] pub observation: String,
+    #[serde(deserialize_with = "flex::string_or_sequence")] pub implication: String,
     #[serde(default)] pub evidence_ids: Vec<String>,
     pub confidence: Confidence,
 }
@@ -126,11 +146,12 @@ pub struct FrameworkSection {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
-pub struct DocumentDraft { pub markdown: String }
+pub struct DocumentDraft { #[serde(deserialize_with = "flex::string_or_sequence")] pub markdown: String }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct InteractionSupplement {
     /// 完整的交互设计补充章节 Markdown，以 ## 标题开头；不含原文其他内容。
+    #[serde(deserialize_with = "flex::string_or_sequence")]
     pub markdown: String,
 }
 
@@ -148,7 +169,7 @@ pub struct DocumentPatches { pub patches: Vec<DocumentPatch> }
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ImpactPlan {
     pub research_needed: bool,
-    pub reason: String,
+    #[serde(deserialize_with = "flex::string_or_sequence")] pub reason: String,
     #[serde(default)] pub affected_sections: Vec<String>,
     #[serde(default)] pub preserved_sections: Vec<String>,
 }
@@ -157,16 +178,16 @@ pub struct ImpactPlan {
 pub struct Review {
     pub approved: bool,
     #[serde(default)] pub findings: Vec<ReviewFinding>,
-    pub summary: String,
+    #[serde(deserialize_with = "flex::string_or_sequence")] pub summary: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ReviewFinding {
     pub section: String,
-    pub problem: String,
+    #[serde(deserialize_with = "flex::string_or_sequence")] pub problem: String,
     pub severity: Severity,
     pub owner: Role,
-    pub recommendation: String,
+    #[serde(deserialize_with = "flex::string_or_sequence")] pub recommendation: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -193,11 +214,11 @@ pub struct ResourcePlan {
 pub struct ResourceItem {
     pub id: String,
     pub name: String,
-    pub specification: String,
+    #[serde(deserialize_with = "flex::string_or_sequence")] pub specification: String,
     pub source_section: String,
     #[serde(default)] pub dependencies: String,
     pub priority: Priority,
-    pub acceptance: String,
+    #[serde(deserialize_with = "flex::string_or_sequence")] pub acceptance: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -213,3 +234,23 @@ impl<T: serde::de::DeserializeOwned + JsonSchema + Serialize + Send + 'static> A
 
 #[allow(dead_code)]
 pub struct VersionRecord { pub id: String, pub project_id: String, pub stage: String, pub version: u32, pub content: Value, pub feedback: String, pub created_at: String }
+
+#[cfg(test)]
+mod flex_tests {
+    use super::flex::string_or_sequence;
+
+    #[test]
+    fn tolerates_sequence_and_null_shapes() {
+        #[derive(serde::Deserialize)]
+        struct Probe {
+            #[serde(deserialize_with = "string_or_sequence")]
+            text: String,
+        }
+        let plain:Probe=serde_json::from_str(r#"{"text":"普通字符串"}"#).unwrap();
+        assert_eq!(plain.text,"普通字符串");
+        let listed:Probe=serde_json::from_str(r#"{"text":["第一行","第二行"]}"#).unwrap();
+        assert_eq!(listed.text,"第一行\n第二行");
+        let null:Probe=serde_json::from_str(r#"{"text":null}"#).unwrap();
+        assert_eq!(null.text,"");
+    }
+}
