@@ -195,8 +195,16 @@ impl Workflow {
         let document=self.bounded_document(project)?;
         let evidence_json=serde_json::to_string(&self.repo.evidence_list(&project.id,100)?)?;
         let evidence=crate::paths::truncate_utf8(&evidence_json,20000);
-        let instruction=format!("独立审核完整 GDD。检查目标一致性、框架覆盖、规则闭环、交互状态、图文引用、来源可追溯与资源清单。只报告有正文证据的问题；若可通过，approved=true 且 findings 为空。输出 Review JSON。\n已确认框架：{}\n文档：{}\n证据索引：{}",project.artifact("framework").unwrap_or(&json!({})),document,evidence);
-        let result=self.agents.run(AgentTask::Review,project,instruction,feedback).await?;
+        let instruction=format!("独立审核完整 GDD。检查目标一致性、框架覆盖、规则闭环、交互状态、图文引用、来源可追溯与资源清单。只报告有正文证据的问题；若可通过，approved=true 且 findings 为空。输出 Review JSON。\n输出纪律：findings 合并同类问题，最多 15 条，按严重程度排序；每条 problem/recommendation 各不超过 100 字；相同章节多个小问题合并为一条。\n已确认框架：{}\n文档：{}\n证据索引：{}",project.artifact("framework").unwrap_or(&json!({})),document,evidence);
+        let result=match self.agents.run(AgentTask::Review,project,instruction.clone(),feedback).await {
+            Ok(result)=>result,
+            Err(AppError::OutputTruncated)=>{
+                self.repo.event(&project.id,"stage","审核发现列表过长被截断；已压缩重试")?;
+                let compressed=format!("{instruction}\n\n【输出压缩要求】上次输出被截断。findings 最多 12 条；每条 problem/recommendation 各不超过 80 字；只保留影响可执行性的 high/medium 问题，low 问题合并为一条汇总。");
+                self.agents.run(AgentTask::Review,project,compressed,feedback).await?
+            },
+            Err(error)=>return Err(error),
+        };
         let review:crate::domain::Review=serde_json::from_value(result.clone())?;
         if !review.approved && review.findings.is_empty() { return Err(AppError::Workflow("审核拒绝但未给出可修订问题，未自动通过".into())); }
         self.save(project,"review",result,"review",feedback)?;

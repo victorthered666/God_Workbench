@@ -44,3 +44,38 @@ async fn truncated_resource_chunk_is_split_and_merged() {
     assert_eq!(plan.features[0].id,"F-001");
     assert!(finished.artifact("document").unwrap().get("markdown").unwrap().as_str().unwrap().contains("附录：功能与制作资源拆解"));
 }
+
+/// 审核首次被截断时，以压缩指令重试一次并通过。
+struct TruncatingReviewer;
+#[async_trait]
+impl AgentExecutor for TruncatingReviewer {
+    async fn run(&self, task: AgentTask, _project: &Project, instruction: String, _feedback: &str) -> gdd_harness::Result<Value> {
+        match task {
+            AgentTask::Review=>{
+                if !instruction.contains("【输出压缩要求】") {
+                    return Err(gdd_harness::AppError::OutputTruncated);
+                }
+                Ok(json!({"approved":true,"findings":[],"summary":"压缩后模拟审核通过"}))
+            },
+            _=>Ok(json!({"summary":"无"})),
+        }
+    }
+    async fn annotate(&self, _project: &Project, _path: &str, _title: &str) -> gdd_harness::Result<Vec<Annotation>> { Ok(vec![]) }
+}
+
+#[tokio::test]
+async fn review_retries_with_compression_after_truncation() {
+    let dir=tempfile::tempdir().unwrap();
+    let config=Config::with_dirs(env!("CARGO_MANIFEST_DIR"),dir.path(),dir.path().join("outputs"),8766);
+    config.init().unwrap();
+    let repo=Repository::new(dir.path().join("test.db")).unwrap();
+    let workflow=Workflow::new(repo.clone(),Arc::new(TruncatingReviewer),config);
+    let project=workflow.create(&gdd_harness::domain::ProjectCreate{name:"审核压缩测试".into(),purpose:"验证压缩重试".into(),references:"离线对象".into(),platform:"".into(),audience:"".into()}).unwrap();
+    repo.save_artifact(&project.id,"document",json!({"markdown":"# 模拟正文\n\n需要审核的正文。"}),"").unwrap();
+    repo.save_artifact(&project.id,"framework",json!({"title":"t","summary":"s","sections":[]}),"").unwrap();
+    repo.update(&project.id,Some("review"),None,None,None,None).unwrap();
+    workflow.execute(&project.id,"review","").await.unwrap();
+    assert_eq!(repo.require(&project.id).unwrap().status,"approved");
+    let events=repo.events(&project.id).unwrap();
+    assert!(events.iter().any(|e|e["message"].as_str().map(|m|m.contains("压缩重试")).unwrap_or(false)));
+}
