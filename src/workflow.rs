@@ -333,7 +333,8 @@ owner 归属标准：正文措辞/数值/引用/表格类矛盾归 writer（可�
             let processable=review.findings.iter().any(|f|matches!(f.owner,Role::Writer|Role::Interaction|Role::Producer));
             if !processable { return Err(AppError::Workflow("本轮剩余问题均为架构/调研类新问题，需人工决策；请调整框架或修改正文后重试".into())); }
         }
-        let mut document=self.bounded_document(project)?;
+        let original_document=self.bounded_document(project)?;
+        let mut document=original_document.clone();
         for role in [Role::Writer,Role::Interaction,Role::Producer] {
             let findings:Vec<_>=review.findings.iter().filter(|finding|finding.owner==role).collect();
             if findings.is_empty() { continue; }
@@ -365,6 +366,11 @@ owner 归属标准：正文措辞/数值/引用/表格类矛盾归 writer（可�
                 document=replace_supplement(&document,&supplement.markdown);
             }
             self.ensure_size(&document)?;
+        }
+        // 防呆：修订后正文一个字没变，复审必然复现同样的问题——
+        // 直接失败并说明原因，不浪费一轮审核调用。
+        if document==original_document {
+            return Err(AppError::Workflow("修订未产生任何正文变化（模型返回了空补丁或未生效补丁），已跳过复审；请重试修订或人工修改正文".into()));
         }
         self.repo.save_artifact(&project.id,"document",json!({"markdown":document}),"")?;
         fs::write(project.working_dir()?.join("document.md"),&document)?;

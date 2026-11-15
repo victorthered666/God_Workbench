@@ -3,14 +3,17 @@ use async_trait::async_trait;
 use gdd_harness::{agent::runtime::{AgentExecutor, AgentTask}, config::Config, domain::{Annotation, Project, Role}, repository::Repository, workflow::Workflow};
 use serde_json::{json, Value};
 
-struct RejectingAgents;
+struct RejectingAgents { revisions: std::sync::atomic::AtomicUsize }
+impl RejectingAgents {
+    fn next_mark(&self) -> String { format!("第{}次修订内容", self.revisions.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1) }
+}
 #[async_trait]
 impl AgentExecutor for RejectingAgents {
     async fn run(&self, task: AgentTask, project: &Project, _instruction: String, _feedback: &str) -> gdd_harness::Result<Value> {
         Ok(match task {
-            AgentTask::DocumentPatch=>json!({"patches":[{"heading":"模拟正文","markdown":"# 模拟正文
+            AgentTask::DocumentPatch=>{ let mark=self.next_mark(); json!({"patches":[{"heading":"模拟正文","markdown":format!("# 模拟正文
 
-修订后的正文"}]}),
+{mark}")}]}) },
             AgentTask::Review=>json!({"approved":false,"findings":[{"section":"核心循环","problem":"缺少出口","severity":"high","owner":"writer","recommendation":"补充"}],"summary":"不通过"}),
             AgentTask::Framework=>json!({"title":"框架","summary":"框架","sections":[{"id":"loop","title":"核心循环","purpose":"循环","requirements":["采集"],"visuals":[],"acceptance":[]}],"boundaries":[]}),
             AgentTask::Document=>json!({"markdown":"# 离线模拟\n\n正文"}),
@@ -27,7 +30,7 @@ async fn three_revisions_stop_for_human_review() {
     let dir=tempfile::tempdir().unwrap();
     let repo=Repository::new(dir.path().join("test.db")).unwrap();
     let config=Config::with_dirs(env!("CARGO_MANIFEST_DIR"),dir.path(),dir.path(),8766);
-    let workflow=Workflow::new(repo.clone(),Arc::new(RejectingAgents),config);
+    let workflow=Workflow::new(repo.clone(),Arc::new(RejectingAgents{revisions:std::sync::atomic::AtomicUsize::new(0)}),config);
     let project=workflow.create(&gdd_harness::domain::ProjectCreate{name:"测试".into(),purpose:"测试".into(),references:"参考".into(),platform:"".into(),audience:"".into()}).unwrap();
     repo.save_artifact(&project.id,"document",json!({"markdown":"# 模拟正文"}),"").unwrap();
     repo.save_artifact(&project.id,"framework",json!({"title":"测试","summary":"测试","sections":[]}),"").unwrap();
@@ -49,7 +52,7 @@ async fn authorize_extra_round_allows_exactly_one_more_revision() {
     let config=Config::with_dirs(env!("CARGO_MANIFEST_DIR"),dir.path(),dir.path(),8766);
     config.init().unwrap();
     let repo=Repository::new(dir.path().join("extra.db")).unwrap();
-    let workflow=Workflow::new(repo.clone(),Arc2::new(RejectingAgents),config);
+    let workflow=Workflow::new(repo.clone(),Arc2::new(RejectingAgents{revisions:std::sync::atomic::AtomicUsize::new(0)}),config);
     let project=workflow.create(&gdd_harness::domain::ProjectCreate{name:"追加轮".into(),purpose:"p".into(),references:"r".into(),platform:String::new(),audience:String::new()}).unwrap();
     repo.save_artifact(&project.id,"document",json!({"markdown":"# 模拟正文"}),"").unwrap();
     repo.save_artifact(&project.id,"framework",json!({"title":"t","summary":"s","sections":[]}),"").unwrap();
