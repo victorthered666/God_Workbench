@@ -616,7 +616,14 @@ fn dedupe_and_renumber(plan: &mut crate::domain::ResourcePlan) {
             if !seen_names.insert(key) { continue; }
             result.push(item);
         }
-        let mut used:std::collections::HashSet<String>=result.iter().map(|item|item.id.trim().to_string()).filter(|id|!id.is_empty()).collect();
+        let mut used:std::collections::HashSet<String>=Default::default();
+        for item in result.iter_mut() {
+            let id=item.id.trim().to_string();
+            if id.is_empty() || !used.insert(id.clone()) {
+                // 跨批次模型会给不同功能分配同一 ID：冲突者一律改派新 ID
+                item.id=String::new();
+            }
+        }
         for item in result.iter_mut() {
             if item.id.trim().is_empty() {
                 loop {

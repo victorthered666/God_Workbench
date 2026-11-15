@@ -47,6 +47,48 @@ async fn truncated_resource_chunk_is_split_and_merged() {
     assert!(finished.artifact("document").unwrap().get("markdown").unwrap().as_str().unwrap().contains("附录：功能与制作资源拆解"));
 }
 
+/// 跨批次两个功能复用同一 ID 时，冲突者必须改派新 ID 而非沿用。
+struct CollidingIds { calls: AtomicUsize }
+#[async_trait]
+impl AgentExecutor for CollidingIds {
+    async fn run(&self, task: AgentTask, _project: &Project, instruction: String, _feedback: &str) -> gdd_harness::Result<Value> {
+        match task {
+            AgentTask::Resources=>{
+                if self.calls.fetch_add(1,Ordering::SeqCst)==0 {
+                    return Err(gdd_harness::AppError::OutputTruncated);
+                }
+                let name=if instruction.contains("内容甲") {"甲块资源"} else {"乙块资源"};
+                Ok(json!({"features":[{"id":"F-100","name":name,"specification":"模拟规格","source_section":name,"dependencies":"","priority":"P1","acceptance":"可验收"}],"art":[],"audio":[]}))
+            },
+            AgentTask::Research|AgentTask::Framework|AgentTask::DocumentAudit|AgentTask::RevisionPlan|AgentTask::Review|AgentTask::Document|AgentTask::DocumentPatch|AgentTask::InteractionSupplement=>Ok(json!({"summary":"无"})),
+        }
+    }
+    async fn annotate(&self, _project: &Project, _path: &str, _title: &str) -> gdd_harness::Result<Vec<Annotation>> { Ok(vec![]) }
+}
+
+#[tokio::test]
+async fn cross_chunk_duplicate_ids_are_reassigned() {
+    let dir=tempfile::tempdir().unwrap();
+    let config=Config::with_dirs(env!("CARGO_MANIFEST_DIR"),dir.path(),dir.path().join("outputs"),8766);
+    config.init().unwrap();
+    let repo=Repository::new(dir.path().join("test.db")).unwrap();
+    let workflow=Workflow::new(repo.clone(),Arc::new(CollidingIds{calls:AtomicUsize::new(0)}),config);
+    let project=workflow.create(&gdd_harness::domain::ProjectCreate{name:"ID 冲突测试".into(),purpose:"验证跨批次 ID 重派".into(),references:"离线对象".into(),platform:"".into(),audience:"".into()}).unwrap();
+    let filler="这是用于撑起章节长度的离线模拟正文。".repeat(20);
+    let document=format!("# 标题\n\n## 一\n\n内容甲开头。\n\n### 一甲\n\n{filler}\n\n## 二\n\n内容乙开头。\n\n### 二甲\n\n{filler}\n");
+    repo.save_artifact(&project.id,"document",json!({"markdown":document}),"").unwrap();
+    repo.update(&project.id,Some("resources"),None,None,None,None).unwrap();
+    workflow.execute(&project.id,"resources","").await.unwrap();
+    let finished=repo.require(&project.id).unwrap();
+    assert_eq!(finished.status,"review");
+    let plan:gdd_harness::domain::ResourcePlan=serde_json::from_value(finished.artifact("resources").unwrap().clone()).unwrap();
+    assert_eq!(plan.features.len(),2);
+    let mut ids:Vec<&str>=plan.features.iter().map(|item|item.id.as_str()).collect();
+    let unique:std::collections::HashSet<&str>=ids.iter().copied().collect();
+    assert_eq!(ids.len(),unique.len(),"冲突 ID 必须被改派为唯一值：{ids:?}");
+    assert!(ids.contains(&"F-100"),"首个占用者保留原 ID");
+}
+
 /// 审核首次被截断时，以压缩指令重试一次并通过。
 struct TruncatingReviewer;
 #[async_trait]
