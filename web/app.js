@@ -108,7 +108,8 @@ function renderWorkspace() {
   if ($('#recover-run')) $('#recover-run').onclick = () => action(`/api/projects/${p.id}/run/${recoverStage()}`, '正在恢复当前阶段');
   if ($('#reaudit-run')) $('#reaudit-run').onclick = () => action(`/api/projects/${p.id}/run/audit`, '正在重新进行结构审核');
   if ($('#continue-run')) $('#continue-run').onclick = () => action(`/api/projects/${p.id}/run/${continueStage}`, `正在继续：${manualStageLabels[continueStage]}`);
-  $('#export-project').disabled = !(p.status === 'approved' || (p.artifacts.project_type === 'document_review' && p.status === 'audit_done')); $('#asset-count').textContent = `(${state.detail.assets.length})`;
+  $('#export-project').disabled = !(p.status === 'approved' || (p.artifacts.project_type === 'document_review' && p.status === 'audit_done'));
+  $('#revise-project').style.display = p.artifacts.project_type === 'document_review' ? 'none' : ''; $('#asset-count').textContent = `(${state.detail.assets.length})`;
   renderArtifact(); renderAssets(); renderHistory();
   if (!state.editing) loadPreview();
 }
@@ -227,7 +228,7 @@ function exportModal() {
   openModal(`<h2 id="modal-title">${state.project?.artifacts?.project_type === 'document_review' ? '导出审核报告' : '交付文档与资料'}</h2><p class="modal-intro">${state.project?.artifacts?.project_type === 'document_review' ? '导出结构审核报告（Markdown/DOCX）与完整资料包。' : '将定稿 Markdown、DOCX、检索证据、图片与图示、审核历史和来源清单一并整理。审核通过才会生成定稿。'}</p><div class="notice">参考图片用于设计研究，可检索不代表获得再发布授权。交付前请核查来源与使用范围。</div><div class="form-actions"><button class="primary" id="generate-export">生成并整理交付包</button></div><div id="download-links"></div>`);
   $('#generate-export').onclick = async () => { const button = $('#generate-export'); button.disabled = true; button.textContent = '正在生成 DOCX 与归档…'; try { const data = await api(`/api/projects/${state.project.id}/export`); $('#download-links').innerHTML = `<p class="modal-intro">已保存至：${esc(data.directory)}</p><div class="form-actions"><a class="secondary" href="/api/projects/${state.project.id}/download/markdown">Markdown</a><a class="secondary" href="/api/projects/${state.project.id}/download/docx">DOCX</a><a class="primary" href="/api/projects/${state.project.id}/download/zip">完整资料 ZIP</a></div>`; button.hidden = true; } catch (error) { toast(error.message); button.disabled = false; button.textContent = '生成并整理交付包'; } };
 }
-$('#new-project').onclick = newProject; $('#audit-project').onclick = auditProjectModal; $('.brand').onclick = (e) => { e.preventDefault(); showHome(); }; $('#back-home').onclick = showHome; $('#open-settings').onclick = () => settingsModal(); const reviseButton = $('#revise-project'); reviseButton.style.display = p.artifacts.project_type === 'document_review' ? 'none' : ''; reviseButton.onclick = revisionModal; $('#export-project').onclick = exportModal;
+$('#new-project').onclick = newProject; $('#audit-project').onclick = auditProjectModal; $('.brand').onclick = (e) => { e.preventDefault(); showHome(); }; $('#back-home').onclick = showHome; $('#open-settings').onclick = () => settingsModal(); $('#revise-project').onclick = revisionModal; $('#export-project').onclick = exportModal;
 $('#autorun-toggle').onclick = async () => {
   const p = state.project; if (!p) return;
   const enable = !(state.detail && state.detail.autorun);
