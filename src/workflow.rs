@@ -129,8 +129,9 @@ impl Workflow {
         );
         let result=self.agents.run(AgentTask::DocumentPatch,project,instruction,feedback).await?;
         let plan:crate::domain::DocumentPatches=serde_json::from_value(result.clone())?;
-        let merged=apply_patches(&old,&plan.patches)?;
+        let (merged,warnings)=apply_patches(&old,&plan.patches)?;
         self.ensure_size(&merged)?;
+        for warning in warnings { self.repo.event(&project.id,"warning",&warning)?; }
         self.save(project,"document",json!({"markdown":merged}),"interaction",feedback)
     }
 
@@ -254,12 +255,14 @@ owner 归属标准：正文措辞/数值/引用/表格类矛盾归 writer（可�
                 // Patch mode: only output replaced sections, never the whole document.
                 let headings=extract_headings(&document);
                 let instruction=format!(
-                    "仅修复以下审核问题。只输出 DocumentPatches JSON：patches 数组，每项 {{heading, markdown}}；heading 逐字取自下方章节清单，markdown 为该章节完整替换内容。未受影响章节不要输出。\n问题：{findings_json}\n章节清单：{}\n现有全文：{document}",
+                    "仅修复以下审核问题。只输出 DocumentPatches JSON：patches 数组，每项 {{heading, markdown}}；heading 逐字取自下方章节清单，markdown 为该章节完整替换内容。未受影响章节不要输出。清单中没有对应章节时，把修改内容并入清单中最相关章节的补丁，不要发明新标题。\n问题：{findings_json}\n章节清单：{}\n现有全文：{document}",
                     serde_json::to_string(&headings)?
                 );
                 let result=self.agents.run(AgentTask::DocumentPatch,project,instruction,feedback).await?;
                 let plan:crate::domain::DocumentPatches=serde_json::from_value(result.clone())?;
-                document=apply_patches(&document,&plan.patches)?;
+                let (patched,warnings)=apply_patches(&document,&plan.patches)?;
+                document=patched;
+                for warning in warnings { self.repo.event(&project.id,"warning",&warning)?; }
             } else {
                 let instruction=format!(
                     "仅修复以下审核问题，输出 InteractionSupplement JSON：markdown 为更新后的交互补充章节完整 Markdown（## 开头），不要复述原文。\n问题：{findings_json}\n现有全文：{document}"
@@ -472,23 +475,51 @@ fn dedupe_and_renumber(plan: &mut crate::domain::ResourcePlan) {
     plan.audio=dedupe(std::mem::take(&mut plan.audio),"S");
 }
 
-/// 应用章节补丁：每个补丁按标题定位并整段替换；找不到标题直接报错，绝不静默丢失。
-fn apply_patches(document: &str, patches: &[crate::domain::DocumentPatch]) -> Result<String> {
+/// 应用章节补丁：精确/模糊定位章节并整段替换；
+/// 确实无对应章节的补丁作为新增内容插入附录前并返回警告，内容绝不丢失。
+fn apply_patches(document: &str, patches: &[crate::domain::DocumentPatch]) -> Result<(String,Vec<String>)> {
     if patches.is_empty() { return Err(AppError::Workflow("模型未返回任何章节补丁".into())); }
     let mut md=document.to_string();
+    let mut warnings=Vec::new();
     for patch in patches {
         let heading=patch.heading.trim();
         if heading.is_empty() { return Err(AppError::Workflow("补丁缺少章节标题".into())); }
-        if let Some((start,content_start,level))=find_section(&md,heading) {
+        if let Some((start,content_start,level))=find_section_fuzzy(&md,heading) {
             let end=section_end(&md,content_start,level);
             let mut replacement=patch.markdown.trim().to_string();
             replacement.push('\n');
             md.replace_range(start..end,&replacement);
         } else {
-            return Err(AppError::Workflow(format!("未在正文中找到待修改章节「{}」，未应用任何补丁",heading)));
+            warnings.push(format!("未在正文中找到章节「{}」，该补丁已作为新增内容插入附录前，请人工核对位置",heading));
+            md=merge_supplement(&md,&patch.markdown);
         }
     }
-    Ok(md)
+    Ok((md,warnings))
+}
+
+fn normalized_heading(heading: &str) -> String {
+    heading.chars().filter(|c|!c.is_whitespace()).collect::<String>().to_lowercase()
+}
+
+/// 先逐字匹配，再按归一化标题双向包含匹配（模型常缩写或改写标题）。
+fn find_section_fuzzy(markdown: &str, heading: &str) -> Option<(usize,usize,usize)> {
+    if let Some(hit)=find_section(markdown,heading) { return Some(hit); }
+    let needle=normalized_heading(heading);
+    if needle.is_empty() { return None; }
+    let mut offset=0;
+    for line in markdown.split_inclusive('\n') {
+        let trimmed=line.trim_end();
+        if trimmed.starts_with('#') {
+            let hashes=trimmed.chars().take_while(|&c|c=='#').count();
+            let title=trimmed[hashes..].trim();
+            let hay=normalized_heading(title);
+            if hay.contains(&needle)||needle.contains(&hay) {
+                return Some((offset,offset+line.len(),hashes));
+            }
+        }
+        offset+=line.len();
+    }
+    None
 }
 
 #[cfg(test)]
@@ -499,17 +530,34 @@ mod tests {
     fn patches_replace_targeted_sections_only() {
         let doc="# T\n\n## A\n\nold a\n\n### A1\n\ndeep\n\n## B\n\nold b\n";
         let patches=vec![crate::domain::DocumentPatch{heading:"A".into(),markdown:"## A\n\nnew a\n".into()}];
-        let out=apply_patches(doc,&patches).unwrap();
+        let (out,_w)=apply_patches(doc,&patches).unwrap();
         assert!(out.contains("new a") && out.contains("old b") && out.contains("## B"));
         assert!(!out.contains("old a") && !out.contains("deep"));
         assert!(apply_patches(doc,&[]).is_err());
     }
 
     #[test]
-    fn unknown_patch_heading_fails_loudly() {
-        let doc="# T\n\n## A\n\nold\n";
-        let patches=vec![crate::domain::DocumentPatch{heading:"不存在".into(),markdown:"x".into()}];
-        assert!(apply_patches(doc,&patches).is_err());
+    fn unknown_patch_heading_inserts_as_new_content() {
+        let doc="# T\n\n## A\n\nold\n\n## 附录：功能与制作资源拆解\n\nrows\n";
+        let patches=vec![crate::domain::DocumentPatch{heading:"不存在的章节".into(),markdown:"## 新增修正\n\n补丁内容".into()}];
+        let (out,warnings)=apply_patches(doc,&patches).unwrap();
+        assert_eq!(warnings.len(),1);
+        assert!(out.contains("补丁内容"));
+        assert!(out.find("补丁内容").unwrap()<out.find("附录").unwrap());
+    }
+
+    #[test]
+    fn fuzzy_heading_match_tolerates_renamed_titles() {
+        let doc="# T\n\n## 9.1 主机手柄映射（可改建）\n\n正文\n";
+        let patches=vec![crate::domain::DocumentPatch{heading:"5.1 输入映射".into(),markdown:"## 5.1 输入映射\n\n新映射规则".into()}];
+        let (out,warnings)=apply_patches(doc,&patches).unwrap();
+        // 模型臆造的标题无法匹配：回退为附录前插入，内容不丢失，原章节不被误改
+        assert_eq!(warnings.len(),1);
+        assert!(out.contains("正文"));
+        let patches2=vec![crate::domain::DocumentPatch{heading:"9.1 主机手柄映射".into(),markdown:"## 9.1 主机手柄映射（可改建）\n\n更新后的映射".into()}];
+        let (out2,w2)=apply_patches(&out,&patches2).unwrap();
+        assert_eq!(w2.len(),0);
+        assert!(out2.contains("更新后的映射"));
     }
 
     #[test]
