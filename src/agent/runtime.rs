@@ -170,8 +170,20 @@ impl AgentRuntime {
                 let title=arguments.get("title").and_then(Value::as_str).unwrap_or("参考图");
                 let root=project.working_dir()?;
                 let (path,metadata)=media::download::download(url,&root).await?;
-                let labels=self.annotate(project,&path,title).await?;
-                let markdown=media::annotate::annotate(&root,&path,title,&labels,url,source_page)?;
+                // 视觉标注失败或标签超限时回退为未标注原图：下载已成功，图片必须
+                // 能进正文——此前标注一失败整条工具报错，agent 便永久放弃嵌图。
+                let labels=match self.annotate(project,&path,title).await {
+                    Ok(labels)=>labels,
+                    Err(error)=>{
+                        self.repo.event(&project.id,"warning",&format!("视觉标注失败，改用未标注原图：{}",crate::paths::truncate_utf8(&error.to_string(),160)))?;
+                        vec![]
+                    }
+                }.into_iter().take(8).collect::<Vec<_>>();
+                let markdown=if labels.is_empty() {
+                    media::annotate::plain_markdown(&path,title,url,source_page)
+                } else {
+                    media::annotate::annotate(&root,&path,title,&labels,url,source_page)?
+                };
                 let mut metadata_with_labels=metadata.as_object().cloned().unwrap_or_default();
                 metadata_with_labels.insert("labels".into(),serde_json::to_value(&labels)?);
                 self.repo.asset(&project.id,url,source_page,&path,metadata.get("sha256").and_then(Value::as_str).unwrap_or(""),Value::Object(metadata_with_labels))?;

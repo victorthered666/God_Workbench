@@ -31,15 +31,45 @@ pub fn annotate(root: &Path, path: &str, title: &str, labels: &[Annotation], sou
     let output=root.join("assets/images").join(&filename);
     canvas.save(output)?;
     let relative=format!("assets/images/{filename}");
-    // title/label 来自模型输出，需转义以免破坏图片链接或注入 Markdown 结构。
-    fn md_text(text:&str)->String { text.chars().filter(|c|*c!='\n'&&*c!='\r').map(|c| if matches!(c,'['|']'|'('|')') { ' ' } else { c }).take(160).collect() }
-    let safe_title=md_text(title);
-    let safe_legend=legend.iter().map(|item| md_text(item)).collect::<Vec<_>>().join("；");
-    let mut caption=format!("![{}]({})\n\n*标注：{}*",safe_title,relative,safe_legend);
-    if !source_url.is_empty() {
-        caption.push_str(&format!("\n\n原图：[检索来源]({})",source_url));
-        if !source_page.is_empty() { caption.push_str(&format!(" · [来源网页]({})",source_page)); }
-        caption.push_str("。可检索不代表取得使用授权。");
-    }
+    let mut caption=format!("![{}]({})\n\n*标注：{}*",md_text(title),relative,legend.iter().map(|item| md_text(item)).collect::<Vec<_>>().join("；"));
+    caption.push_str(&source_links(source_url,source_page));
     Ok(caption)
+}
+
+/// 视觉标注不可用（模型故障/返回空标签）时的回退：直接嵌入未标注原图，
+/// 而不是让整条 select_image 失败——此前一失败图片就永远进不了正文。
+pub fn plain_markdown(path: &str, title: &str, source_url: &str, source_page: &str) -> String {
+    format!("![{}]({})\n\n*网络参考图（未标注）*{}",md_text(title),path,source_links(source_url,source_page))
+}
+
+fn source_links(source_url: &str, source_page: &str) -> String {
+    let mut tail=String::new();
+    if !source_url.is_empty() {
+        tail.push_str(&format!("\n\n原图：[检索来源]({})",source_url));
+        if !source_page.is_empty() { tail.push_str(&format!(" · [来源网页]({})",source_page)); }
+        tail.push_str("。可检索不代表取得使用授权。");
+    }
+    tail
+}
+
+// title/label 来自模型输出，需转义以免破坏图片链接或注入 Markdown 结构。
+fn md_text(text: &str) -> String { text.chars().filter(|c|*c!='\n'&&*c!='\r').map(|c| if matches!(c,'['|']'|'('|')') { ' ' } else { c }).take(160).collect() }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn plain_markdown_escapes_and_links_sources() {
+        let md=plain_markdown("assets/images/a.jpg","怪猎[截图](测试)","https://cdn.example/x.jpg","https://game.example/page");
+        assert!(md.starts_with("![怪猎 截图  测试 ](assets/images/a.jpg)"),"{md}");
+        assert!(md.contains("*网络参考图（未标注）*"));
+        assert!(md.contains("[检索来源](https://cdn.example/x.jpg)"));
+        assert!(md.contains("[来源网页](https://game.example/page)"));
+        assert!(md.contains("可检索不代表取得使用授权"));
+    }
+    #[test]
+    fn plain_markdown_without_source_has_no_links() {
+        let md=plain_markdown("assets/images/b.jpg","无来源图","","");
+        assert!(!md.contains("检索来源"));
+    }
 }
