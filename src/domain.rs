@@ -71,6 +71,8 @@ pub struct AgentSettings {
     #[serde(default = "default_key_env")] pub api_key_env: String,
     #[serde(default = "default_temperature")] pub temperature: f64,
     #[serde(default = "default_tokens")] pub max_tokens: u32,
+    /// 留空表示跟随模型默认；结构化输出任务建议 disabled，避免推理 token 挤占输出预算。
+    #[serde(default = "default_thinking")] pub thinking: String,
     #[serde(default = "default_vision_model")] pub vision_model: String,
     #[serde(default)] pub skills: Vec<String>,
     #[serde(default)] pub prompt: String,
@@ -81,6 +83,7 @@ fn default_base_url() -> String { "https://api.deepseek.com".into() }
 fn default_key_env() -> String { "DEEPSEEK_API_KEY".into() }
 fn default_temperature() -> f64 { 0.3 }
 fn default_tokens() -> u32 { 16000 }
+fn default_thinking() -> String { "disabled".into() }
 fn default_vision_model() -> String { "deepseek-flash".into() }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]

@@ -55,6 +55,7 @@ impl AgentRuntime {
         if let Some(values)=saved.as_object() { for (key,value) in values { if key!="api_key" { merged[key]=value.clone(); } } }
         let mut settings:AgentSettings=serde_json::from_value(merged)?;
         if !(0.0..=2.0).contains(&settings.temperature) || !(512..=65536).contains(&settings.max_tokens) || settings.base_url.is_empty() { return Err(AppError::Agent("模型参数配置不合法".into())); }
+        if !matches!(settings.thinking.as_str(), "" | "enabled" | "disabled") { return Err(AppError::Agent("thinking 只能为空、enabled 或 disabled".into())); }
         if settings.base_url.starts_with("http://") && !settings.base_url.starts_with("http://127.0.0.1") && !settings.base_url.starts_with("http://localhost") { return Err(AppError::Agent("模型 Base URL 必须使用 HTTPS".into())); }
         let prompt=self.repo.setting(&format!("prompt:{}",role.as_str()),Value::String(fs::read_to_string(self.root.join(format!("agents/{}.md",role.as_str())))?))?;
         settings.prompt=prompt.as_str().unwrap_or_default().to_string();
@@ -119,6 +120,7 @@ impl AgentRuntime {
         let result=async {
             for step in 0..16 {
                 let mut body=json!({"model":settings.model,"messages":messages,"temperature":settings.temperature,"max_tokens":settings.max_tokens});
+                if !settings.thinking.is_empty() { body["thinking"]=json!({"type":settings.thinking}); }
                 if !tools.is_empty() { body["tools"]=json!(tools); body["tool_choice"]=json!(if step==15{"none"}else{"auto"}); }
                 if messages.last().and_then(|m|m.get("role")).and_then(Value::as_str)!=Some("user") { messages.push(json!({"role":"user","content":format!("停止工具调用，输出符合以下 JSON Schema 的单个 JSON 对象，不要 Markdown 代码块：{}",serde_json::to_string(&schema_for!(T))?)})); }
                 let response=client.post(format!("{}/chat/completions",settings.base_url.trim_end_matches('/'))).bearer_auth(&key).json(&body).send().await?;
