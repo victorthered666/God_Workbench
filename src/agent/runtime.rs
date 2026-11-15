@@ -19,6 +19,7 @@ pub enum AgentTask {
     DocumentPatch,
     InteractionSupplement,
     Resources,
+    DocumentAudit,
 }
 
 impl AgentTask {
@@ -29,6 +30,7 @@ impl AgentTask {
             Self::Document | Self::DocumentPatch => Role::Writer,
             Self::InteractionSupplement => Role::Interaction,
             Self::Resources => Role::Producer,
+            Self::DocumentAudit => Role::Architect,
         }
     }
 }
@@ -240,6 +242,7 @@ impl AgentExecutor for AgentRuntime {
             AgentTask::DocumentPatch => Ok(serde_json::to_value(self.execute::<crate::domain::DocumentPatches>(role,project,instruction,feedback,vec![]).await?)?),
             AgentTask::InteractionSupplement => Ok(serde_json::to_value(self.execute::<crate::domain::InteractionSupplement>(role,project,instruction,feedback,vec![]).await?)?),
             AgentTask::Resources => Ok(serde_json::to_value(self.execute::<crate::domain::ResourcePlan>(role,project,instruction,feedback,vec![]).await?)?),
+            AgentTask::DocumentAudit => Ok(serde_json::to_value(self.execute::<crate::domain::AuditReport>(role,project,instruction,feedback,vec![]).await?)?),
         }
     }
 

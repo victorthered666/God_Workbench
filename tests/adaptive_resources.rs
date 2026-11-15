@@ -17,7 +17,7 @@ impl AgentExecutor for FlakyProducer {
                 let name=if instruction.contains("内容甲") {"甲块资源"} else {"乙块资源"};
                 Ok(json!({"features":[{"id":"F-999","name":name,"specification":"模拟规格","source_section":name,"dependencies":"","priority":"P1","acceptance":"可验收"}],"art":[],"audio":[]}))
             },
-            AgentTask::Research|AgentTask::Framework|AgentTask::RevisionPlan|AgentTask::Review|AgentTask::Document|AgentTask::DocumentPatch|AgentTask::InteractionSupplement=>Ok(json!({"summary":"无"})),
+            AgentTask::Research|AgentTask::Framework|AgentTask::DocumentAudit|AgentTask::RevisionPlan|AgentTask::Review|AgentTask::Document|AgentTask::DocumentPatch|AgentTask::InteractionSupplement=>Ok(json!({"summary":"无"})),
         }
     }
     async fn annotate(&self, _project: &Project, _path: &str, _title: &str) -> gdd_harness::Result<Vec<Annotation>> { Ok(vec![]) }

@@ -24,6 +24,23 @@ impl Workflow {
         Ok(project)
     }
 
+    /// 审核文档项目：导入已撰写文档，直接进入结构审核，不经过五角色生成流程。
+    pub fn create_audit(&self, data: &crate::domain::ProjectAuditCreate) -> Result<Project> {
+        if data.markdown.trim().is_empty() { return Err(AppError::Invalid("导入的文档内容不能为空".into())); }
+        if data.markdown.len()>Self::MAX_DOCUMENT_BYTES { return Err(AppError::Invalid("导入文档超过 2 MiB 限制".into())); }
+        let request=ProjectCreate{name:data.name.clone(),purpose:"导入已撰写文档进行结构审核".into(),references:"用户导入文档".into(),platform:data.platform.clone(),audience:data.audience.clone()};
+        let mut project=self.repo.create_project(&request)?;
+        let root=self.config.output_dir.join(format!("{}-{}",safe_name(&data.name),&project.id[..8]));
+        for path in ["assets/images","assets/diagrams","research","reviews","versions"] { fs::create_dir_all(root.join(path))?; }
+        project.artifacts=json!({"working_dir":root,"project_type":"document_review"});
+        self.repo.update(&project.id,None,Some(project.artifacts.clone()),None,None,None)?;
+        self.repo.save_artifact(&project.id,"document",json!({"markdown":data.markdown}),"导入文档")?;
+        fs::write(root.join("document.md"),&data.markdown)?;
+        self.repo.update(&project.id,Some("audit_ready"),None,Some(None),None,None)?;
+        self.repo.event(&project.id,"stage","已导入文档；等待结构审核")?;
+        Ok(project)
+    }
+
     pub async fn execute(&self, project_id: &str, stage: &str, feedback: &str) -> Result<Project> {
         let project=self.repo.require(project_id)?;
         if project.running() { return Err(AppError::Workflow("已有阶段正在执行，请等待完成".into())); }
@@ -36,6 +53,7 @@ impl Workflow {
             "resources"=>matches!(project.status.as_str(),"resources"|"interrupted"),
             "review"=>matches!(project.status.as_str(),"review"|"interrupted"),
             "revise"=>matches!(project.status.as_str(),"review"|"needs_human"),
+            "audit"=>matches!(project.status.as_str(),"audit_ready"|"audit_done"|"interrupted"),
             _=>false,
         };
         if stage=="framework" && project.status=="research_review" { return Err(AppError::Workflow("调研意见尚未由用户确认".into())); }
@@ -62,8 +80,33 @@ impl Workflow {
             "resources"=>self.resources(project,feedback).await,
             "review"=>self.review(project,feedback).await,
             "revise"=>self.revise(project,feedback).await,
+            "audit"=>self.audit(project,feedback).await,
             _=>Err(AppError::Workflow("未知阶段".into())),
         }
+    }
+
+    /// 审核已导入文档：结构完整性 + 前后/与目的一致性，产出问题报告。
+    async fn audit(&self, project: &Project, feedback: &str) -> Result<()> {
+        let document=self.bounded_document(project)?;
+        let instruction=format!(
+            "审核以下已撰写文档（不生成新文档，只输出审核报告）。
+审核任务：
+1. 结构完整性：判断文档是否具备从「设计目的」开始的完整结构——至少检查设计目的、目标受众与平台、核心玩法/循环、系统规则、交互与反馈、边界与验收标准；缺失的写入 structure.missing_sections，并说明识别到的设计目的。
+2. 前后一致性：逐节通读，找出前后矛盾、数值/规则冲突、引用错位，以及与设计目的不一致的内容；每条给 section/problem/evidence(原文引用)/severity/recommendation。
+要求：只报告有原文依据的问题；合并同类小问题；问题按严重程度排序；没有问题就返回空列表，不要为了凑数编造。
+
+文档全文：
+{document}"
+        );
+        let result=self.agents.run(AgentTask::DocumentAudit,project,instruction,feedback).await?;
+        let report:crate::domain::AuditReport=serde_json::from_value(result.clone())?;
+        let markdown=crate::export::audit::audit_report_markdown(&project.name,&report);
+        self.ensure_size(&markdown)?;
+        self.repo.save_artifact(&project.id,"audit_report",result,&feedback)?;
+        fs::write(project.working_dir()?.join("audit_report.md"),&markdown)?;
+        self.repo.update(&project.id,Some("audit_done"),None,Some(None),None,None)?;
+        self.repo.event(&project.id,"stage","文档结构审核完成；报告已生成")?;
+        Ok(())
     }
 
     fn save(&self, project: &Project, stage: &str, content: Value, status: &str, feedback: &str) -> Result<()> {
@@ -330,7 +373,10 @@ owner 归属标准：正文措辞/数值/引用/表格类矛盾归 writer（可�
         if project.running() { return Err(AppError::Workflow("任务运行时不能手动编辑".into())); }
         if content.trim().is_empty() { return Err(AppError::Workflow("文档不能为空".into())); }
         if content.len()>2*1024*1024 { return Err(AppError::Workflow("正文超过 2 MiB，请先拆分".into())); }
-        self.save(&project,"document",json!({"markdown":content}),if project.artifact("document").is_some(){"resources"}else{&project.status},"")?;
+        let audit_type=project.artifacts.get("project_type").and_then(Value::as_str)==Some("document_review");
+        let next_status=if audit_type {"audit_ready"} else if project.artifact("document").is_some(){"resources"}else{&project.status};
+        self.save(&project,"document",json!({"markdown":content}),next_status,"")?;
+        if audit_type { self.repo.event(project_id,"edit","导入文档已修改；可重新进行结构审核")?; }
         self.repo.event(project_id,"edit","用户手动保存正文；需重新整理资源并审核")
     }
 }

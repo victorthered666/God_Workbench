@@ -234,6 +234,43 @@ pub struct ResourceItem {
 pub enum Priority { P0, P1, P2 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ProjectAuditCreate {
+    #[validate(length(min = 1, max = 120))]
+    pub name: String,
+    /// 已撰写好的完整文档 Markdown。
+    pub markdown: String,
+    #[serde(default)] pub platform: String,
+    #[serde(default)] pub audience: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct StructureAssessment {
+    /// 从文档中识别/推断出的设计目的；未写明则描述缺失情况。
+    #[serde(default, deserialize_with = "flex::string_or_sequence")] pub design_purpose: String,
+    /// 缺失的结构性章节名称（如：设计目的、受众与平台、核心循环、验收标准）。
+    #[serde(default)] pub missing_sections: Vec<String>,
+    #[serde(default, deserialize_with = "flex::string_or_sequence")] pub comment: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct AuditFinding {
+    #[serde(default, deserialize_with = "flex::string_or_sequence")] pub section: String,
+    #[serde(default, deserialize_with = "flex::string_or_sequence")] pub problem: String,
+    /// 文中原文引用，作为问题证据。
+    #[serde(default, deserialize_with = "flex::string_or_sequence")] pub evidence: String,
+    #[serde(default)] pub severity: Severity,
+    #[serde(default, deserialize_with = "flex::string_or_sequence")] pub recommendation: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct AuditReport {
+    #[serde(default)] pub structure: StructureAssessment,
+    /// 前后不一致、与设计目的不一致的问题清单。
+    #[serde(default)] pub consistency_findings: Vec<AuditFinding>,
+    #[serde(default, deserialize_with = "flex::string_or_sequence")] pub summary: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Annotation { pub x: f64, pub y: f64, pub text: String }
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Annotations { pub labels: Vec<Annotation> }

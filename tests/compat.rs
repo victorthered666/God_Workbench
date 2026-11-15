@@ -13,7 +13,7 @@ impl AgentExecutor for FakeAgents {
             AgentTask::Document=>json!({"markdown":"# 测试策划\n\n## 核心循环\n\n玩家采集资源并制作工具。\n\n## 交互\n\n| 操作 | 反馈 |\n| --- | --- |\n| 采集 | 资源入包 |\n\n这是离线模拟正文，不代表真实调研。"}),
             AgentTask::InteractionSupplement=>json!({"markdown":"## 交互设计补充\n\n采集不可用时必须说明原因并提示恢复方式（离线模拟补充）。"}),
             AgentTask::Resources=>json!({"features":[{"id":"F-001","name":"采集","specification":"选择资源","source_section":"核心循环","dependencies":"","priority":"P0","acceptance":"资源入包"}],"art":[],"audio":[]}),
-            AgentTask::Review|AgentTask::RevisionPlan|AgentTask::DocumentPatch=>json!({"approved":true,"patches":[],"findings":[],"summary":"未用到"}),
+            AgentTask::Review|AgentTask::RevisionPlan|AgentTask::DocumentPatch|AgentTask::DocumentAudit=>json!({"approved":true,"patches":[],"findings":[],"summary":"未用到"}),
         })
     }
     async fn annotate(&self, _project: &Project, _path: &str, _title: &str) -> gdd_harness::Result<Vec<Annotation>> { Ok(vec![]) }

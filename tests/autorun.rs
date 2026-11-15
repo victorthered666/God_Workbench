@@ -15,7 +15,7 @@ impl AgentExecutor for AutoAgents {
             AgentTask::Framework=>json!({"title":"测试","summary":"框架","sections":[{"id":"loop","title":"核心循环","purpose":"规则","requirements":["采集"],"visuals":["流程"],"acceptance":["闭环"]}],"boundaries":[]}),
             AgentTask::Document=>json!({"markdown":"# 测试策划\n\n## 核心循环\n\n玩家采集资源。\n\n## 交互\n\n| 操作 | 反馈 |\n| --- | --- |\n| 采集 | 入包 |\n\n离线模拟正文。"}),
             AgentTask::InteractionSupplement=>json!({"markdown":"## 交互设计补充\n\n采集不可用时需说明原因（离线模拟补充）。"}),
-            AgentTask::DocumentPatch|AgentTask::Resources=>json!({"features":[{"id":"F-001","name":"采集","specification":"选择资源","source_section":"核心循环","dependencies":"","priority":"P0","acceptance":"资源入包"}],"art":[],"audio":[]}),
+            AgentTask::DocumentAudit|AgentTask::DocumentPatch|AgentTask::Resources=>json!({"features":[{"id":"F-001","name":"采集","specification":"选择资源","source_section":"核心循环","dependencies":"","priority":"P0","acceptance":"资源入包"}],"art":[],"audio":[]}),
         })
     }
     async fn annotate(&self, _project: &Project, _path: &str, _title: &str) -> gdd_harness::Result<Vec<Annotation>> { Ok(vec![]) }

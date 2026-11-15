@@ -7,7 +7,15 @@ use super::docx::render;
 pub fn export(repo: &Repository, project: &Project) -> Result<Value> {
     let root=project.working_dir()?;
     let title=safe_name(&project.name);
-    let markdown=project.artifact("document").and_then(|v|v.get("markdown")).and_then(Value::as_str).ok_or_else(||AppError::Workflow("缺少可导出的正文".into()))?;
+    let audit_type=project.artifacts.get("project_type").and_then(Value::as_str)==Some("document_review");
+    let markdown=if audit_type {
+        let report_json=project.artifacts.get("audit_report").and_then(|a|a.get("content")).cloned().ok_or_else(||AppError::Workflow("审核报告尚未生成".into()))?;
+        let report:crate::domain::AuditReport=serde_json::from_value(report_json)?;
+        crate::export::audit::audit_report_markdown(&project.name,&report)
+    } else {
+        project.artifact("document").and_then(|v|v.get("markdown")).and_then(Value::as_str).ok_or_else(||AppError::Workflow("缺少可导出的正文".into()))?.to_string()
+    };
+    let markdown=markdown.as_str();
     for path in image_paths(markdown) { contained_file(&root,&path)?; }
     let md_path=root.join(format!("{title}.md"));
     let docx_path=root.join(format!("{title}.docx"));

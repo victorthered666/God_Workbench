@@ -15,7 +15,7 @@ impl AgentExecutor for RejectingAgents {
             AgentTask::Framework=>json!({"title":"框架","summary":"框架","sections":[{"id":"loop","title":"核心循环","purpose":"循环","requirements":["采集"],"visuals":[],"acceptance":[]}],"boundaries":[]}),
             AgentTask::Document=>json!({"markdown":"# 离线模拟\n\n正文"}),
             AgentTask::InteractionSupplement=>json!({"markdown":"## 交互设计补充\n\n修订后的交互说明"}),
-            AgentTask::RevisionPlan|AgentTask::Research=>json!({"summary":"调研","findings":[],"recommendations":[],"writing_advice":[],"limitations":[]}),
+            AgentTask::RevisionPlan|AgentTask::Research|AgentTask::DocumentAudit=>json!({"summary":"调研","findings":[],"recommendations":[],"writing_advice":[],"limitations":[]}),
             AgentTask::Resources=>json!({"features":[],"art":[],"audio":[]}),
         })
     }

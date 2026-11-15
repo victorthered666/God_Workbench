@@ -9,3 +9,8 @@
 #autorun-toggle.active{background:var(--ink);border-color:var(--ink);color:#fff}
 
 .readonly-field{background:#eceee9;color:var(--muted)}
+
+.hero-actions{display:flex;gap:12px;justify-content:center;margin-top:30px;flex-wrap:wrap}
+.audit-report{font-size:13px;line-height:1.9;color:#4d615c}
+.audit-report .finding{border-left:2px solid #96ad9d;padding:5px 18px;margin:12px 0}
+.audit-report .evidence{background:#f0f3ef;border-radius:4px;padding:10px 14px;color:#58716c;font-size:12px;margin-top:6px}

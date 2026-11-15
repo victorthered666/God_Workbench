@@ -13,7 +13,7 @@ const stages = [
   ['document', '文档撰写', '规则细化与参考图'], ['interaction', '交互补全', '状态、流程与线框图'],
   ['resources', '资源拆解', '功能、美术与音效'], ['review', '架构审核', '质量门禁与定稿'],
 ];
-const statusText = { research_review: '请审阅调研意见', framework_review: '请确认文档框架', revision_review: '请确认修改影响范围', framework_approved: '框架已确认', interaction: '文档已生成，等待交互细化', resources: '交互已补全，等待资源拆解', review: '等待架构审核', approved: '审核通过，可导出', needs_human: '审核未通过，需要人工处理', interrupted: '执行中断，可检查并恢复' };
+const statusText = { audit_ready: '文档已导入，等待结构审核', audit_done: '审核完成，查看问题报告', research_review: '请审阅调研意见', framework_review: '请确认文档框架', revision_review: '请确认修改影响范围', framework_approved: '框架已确认', interaction: '文档已生成，等待交互细化', resources: '交互已补全，等待资源拆解', review: '等待架构审核', approved: '审核通过，可导出', needs_human: '审核未通过，需要人工处理', interrupted: '执行中断，可检查并恢复' };
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const toast = (message) => { $('#toast').textContent = message; $('#toast').classList.add('show'); clearTimeout(state.toast); state.toast = setTimeout(() => $('#toast').classList.remove('show'), 5500); };
 async function api(path, options = {}) {
@@ -74,6 +74,7 @@ async function loadProject(id) {
 function schedulePoll() { clearTimeout(state.timer); if (state.project?.status.startsWith('running:')) state.timer = setTimeout(() => loadProject(state.project.id), 2500); }
 function currentStage() {
   const p = state.project;
+  if (p.artifacts.project_type === 'document_review') return p.status === 'audit_done' ? 'audit' : 'import';
   if (p.status === 'running:revise' || p.status === 'needs_human') return 'review';
   if (p.status.startsWith('running:')) return p.status.split(':')[1] === 'revision_plan' ? 'research' : p.status.split(':')[1];
   if (p.status === 'research_review') return 'research'; if (p.status === 'revision_review') return 'research';
@@ -88,13 +89,15 @@ function stageCompleted(key) {
 function renderWorkspace() {
   const p = state.project;
   $('#project-title').textContent = p.name; $('#project-meta').textContent = `第 ${p.revision} 版 · ${p.reference_text.slice(0, 80)} · 审核修订 ${p.review_round}/3`;
-  const stage = currentStage(); const role = stage === 'review' ? 'architect' : stage === 'research' || stage === 'revision_plan' ? 'research' : stage === 'framework' ? 'architect' : stage === 'document' ? 'writer' : stage === 'interaction' ? 'interaction' : stage === 'resources' ? 'producer' : 'architect';
+  const stage = currentStage(); const role = stage === 'audit' ? 'architect' : stage === 'import' ? 'producer' : stage === 'review' ? 'architect' : stage === 'research' || stage === 'revision_plan' ? 'research' : stage === 'framework' ? 'architect' : stage === 'document' ? 'writer' : stage === 'interaction' ? 'interaction' : stage === 'resources' ? 'producer' : 'architect';
   $('#active-agent').textContent = roles[role] || '架构策划';
-  $('#stage-list').innerHTML = stages.map(([key, title, description], i) => `<li data-number="${i+1}" class="${key === stage ? 'active' : stageCompleted(key) ? 'done' : ''}"><strong>${title}</strong><small>${description}</small></li>`).join('');
+  const auditType = p.artifacts.project_type === 'document_review';
+  const stageSource = auditType ? [['import', '导入文档', '已撰写文档全文'], ['audit', '结构审核', '完整性与一致性']] : stages;
+  $('#stage-list').innerHTML = stageSource.map(([key, title, description], i) => `<li data-number="${i+1}" class="${key === stage ? 'active' : (auditType ? key !== stage : stageCompleted(key)) ? 'done' : ''}"><strong>${title}</strong><small>${description}</small></li>`).join('');
   const running = p.status.startsWith('running:'); const error = p.status === 'interrupted' || p.status === 'needs_human';
   $('#status-banner').className = `status-banner ${running ? 'running ' : ''}${error ? 'error' : ''}`;
   const continueStage = (!running && !error) ? nextManualStage(p) : null;
-  $('#status-banner').innerHTML = `<span>${running ? '◌' : error ? '!' : '●'}</span><span>${esc(p.error || (p.artifacts.review?.content?.summary?.includes('本地模拟审核') ? '模拟审核 · 仅供验收' : statusText[p.status]) || `正在执行 ${p.status.slice(8)}`)}</span>${running ? `<span id="run-elapsed" class="run-elapsed"></span><button class="secondary small" id="cancel-run">取消</button>` : continueStage ? `<button class="primary small" id="continue-run">继续：${manualStageLabels[continueStage]}</button>` : error && recoverStage() ? '<button class="secondary small" id="recover-run">从当前阶段恢复</button>' : ''}`;
+  $('#status-banner').innerHTML = `<span>${running ? '◌' : error ? '!' : '●'}</span><span>${esc(p.error || (p.artifacts.review?.content?.summary?.includes('本地模拟审核') ? '模拟审核 · 仅供验收' : statusText[p.status]) || `正在执行 ${p.status.slice(8)}`)}</span>${running ? `<span id="run-elapsed" class="run-elapsed"></span><button class="secondary small" id="cancel-run">取消</button>` : continueStage ? `<button class="primary small" id="continue-run">继续：${manualStageLabels[continueStage]}</button>` : error && recoverStage() ? '<button class="secondary small" id="recover-run">从当前阶段恢复</button>' : p.status === 'audit_done' ? '<button class="secondary small" id="reaudit-run">重新审核</button>' : ''}`;
   if (running) {
     const startEvt = state.detail.events.find((e) => e.kind === 'stage' && e.message.startsWith('开始执行'));
     state.runningSince = startEvt ? new Date(startEvt.created_at).getTime() : Date.now();
@@ -103,14 +106,16 @@ function renderWorkspace() {
   const autorunButton = $('#autorun-toggle'); autorunButton.textContent = `全自动：${state.detail.autorun ? '开' : '关'}`; autorunButton.classList.toggle('active', !!state.detail.autorun);
   if ($('#cancel-run')) $('#cancel-run').onclick = () => action(`/api/projects/${p.id}/cancel`, '已请求取消；已发出的外部请求不会被重复提交');
   if ($('#recover-run')) $('#recover-run').onclick = () => action(`/api/projects/${p.id}/run/${recoverStage()}`, '正在恢复当前阶段');
+  if ($('#reaudit-run')) $('#reaudit-run').onclick = () => action(`/api/projects/${p.id}/run/audit`, '正在重新进行结构审核');
   if ($('#continue-run')) $('#continue-run').onclick = () => action(`/api/projects/${p.id}/run/${continueStage}`, `正在继续：${manualStageLabels[continueStage]}`);
-  $('#export-project').disabled = p.status !== 'approved'; $('#asset-count').textContent = `(${state.detail.assets.length})`;
+  $('#export-project').disabled = !(p.status === 'approved' || (p.artifacts.project_type === 'document_review' && p.status === 'audit_done')); $('#asset-count').textContent = `(${state.detail.assets.length})`;
   renderArtifact(); renderAssets(); renderHistory();
   if (!state.editing) loadPreview();
 }
-function recoverStage() { const p = state.project; if (p.status === 'needs_human') return 'revise'; if (!p.artifacts.research) return 'research'; if (p.artifacts.research && !p.artifacts.research.approved) return null; if (!p.artifacts.framework) return 'framework'; if (!p.artifacts.framework.approved) return null; if (!p.artifacts.document) return 'document'; if (!p.artifacts.interaction) return 'interaction'; if (!p.artifacts.resources) return 'resources'; return 'review'; }
-const manualStageLabels = { research: '调研分析', framework: '文档框架', document: '文档撰写', interaction: '交互补全', resources: '资源拆解', review: '架构审核', revise: '按审核意见修订复审' };
+function recoverStage() { const p = state.project; if (p.artifacts.project_type === 'document_review') return p.status === 'audit_done' ? null : 'audit'; if (p.status === 'needs_human') return 'revise'; if (!p.artifacts.research) return 'research'; if (p.artifacts.research && !p.artifacts.research.approved) return null; if (!p.artifacts.framework) return 'framework'; if (!p.artifacts.framework.approved) return null; if (!p.artifacts.document) return 'document'; if (!p.artifacts.interaction) return 'interaction'; if (!p.artifacts.resources) return 'resources'; return 'review'; }
+const manualStageLabels = { audit: '结构审核', research: '调研分析', framework: '文档框架', document: '文档撰写', interaction: '交互补全', resources: '资源拆解', review: '架构审核', revise: '按审核意见修订复审' };
 function nextManualStage(p) {
+  if (p.artifacts.project_type === 'document_review') return p.status === 'audit_ready' ? 'audit' : null;
   switch (p.status) {
     case 'interaction': return 'interaction';
     case 'resources': return 'resources';
@@ -126,7 +131,8 @@ function renderArtifact() {
   const record = p.artifacts[key];
   if (!record) { $('#tab-deliverable').innerHTML = `<div class="empty-projects"><span>◇</span><h3>${p.status.startsWith('running:') ? '正在整理阶段产物' : '此阶段尚未开始'}</h3><p>${p.status.startsWith('running:') ? '工具调用和模型输出会写入日志。完成后请审阅，不会自动越过人工门禁。' : '完成前置阶段后，这里将展示产物。'}</p></div>`; return; }
   const content = record.content;
-  let html = `<div class="artifact-title"><h2>${key === 'research' ? '调研与撰写意见' : key === 'framework' ? '文档框架' : key === 'review' ? '架构审核报告' : key === 'revision_plan' ? '修改影响范围' : '当前正文'}</h2><small>版本 ${record.version}${record.approved ? ' · 已确认' : ''}</small></div>`;
+  if (key === 'audit_report') { $('#tab-deliverable').innerHTML = auditReportHtml(content, record.version); return; }
+  let html = `<div class="artifact-title"><h2>${key === 'audit_report' ? '文档审核报告' : key === 'research' ? '调研与撰写意见' : key === 'framework' ? '文档框架' : key === 'review' ? '架构审核报告' : key === 'revision_plan' ? '修改影响范围' : '当前正文'}</h2><small>版本 ${record.version}${record.approved ? ' · 已确认' : ''}</small></div>`;
   if (key === 'research') html += researchHtml(content);
   else if (key === 'framework') html += frameworkHtml(content);
   else if (key === 'review') html += reviewHtml(content);
@@ -172,6 +178,40 @@ async function action(path, message, body = null, close = false) {
   try { await api(path, { method: body ? 'POST' : 'POST', body: body ? JSON.stringify(body) : undefined }); if (close) closeModal(); toast(message); await refreshProjects(); if (state.project) await loadProject(state.project.id); } catch (error) { toast(error.message); if (state.project) await loadProject(state.project.id); }
 }
 async function refreshProjects() { const data = await api('/api/bootstrap'); state.csrf = data.csrf_token; state.projects = data.projects; state.settings = data.roles; renderProjects(); }
+function auditReportHtml(content, version) {
+  const structure = content.structure || {};
+  const findings = content.consistency_findings || [];
+  const severityText = { high: '高', medium: '中', low: '低' };
+  const missing = (structure.missing_sections || []).map((x) => `<li>${esc(x)}</li>`).join('');
+  return `<div class="artifact-title"><h2>文档审核报告</h2><small>版本 ${version}</small></div>
+    <div class="audit-report">
+      <div class="artifact-section"><h3>一、结构完整性</h3>
+        <p><b>识别到的设计目的：</b>${structure.design_purpose ? esc(structure.design_purpose) : '<em>未能识别出明确的设计目的</em>'}</p>
+        <p><b>结构缺失章节：</b></p>${missing ? `<ul>${missing}</ul>` : '<p>未发现明显缺失的必要章节。</p>'}
+        ${structure.comment ? `<p><b>结构评述：</b>${esc(structure.comment)}</p>` : ''}
+      </div>
+      <div class="artifact-section"><h3>二、前后一致性（含与设计目的不一致）</h3>
+        ${findings.length ? findings.map((f) => `<div class="finding"><strong>${esc(f.section || '未标明章节')} · ${severityText[f.severity] || '中'}</strong><p>${esc(f.problem)}</p>${f.evidence ? `<div class="evidence">证据：${esc(f.evidence)}</div>` : ''}<p><b>建议：</b>${esc(f.recommendation)}</p></div>`).join('') : '<p>未发现明确的前后矛盾或与设计目的不一致之处。</p>'}
+      </div>
+      <div class="artifact-section"><h3>三、总体结论</h3><p>${esc(content.summary || '（未给出总结）')}</p></div>
+    </div>`;
+}
+
+function auditProjectModal() {
+  openModal(`<h2 id="modal-title">审核已有文档</h2><p class="modal-intro">导入已撰写好的策划文档，系统将审核：1) 是否具备从设计目的开始的完整结构；2) 前后内容是否一致、是否与设计目的一致；并生成问题报告。</p><form id="audit-form"><label class="field"><span>文档名称 *</span><input name="name" maxlength="120" required placeholder="例如：某玩法策划案审核"></label><label class="field"><span>从文件导入</span><input type="file" id="audit-file" accept=".md,.markdown,.txt"></label><label class="field"><span>文档内容 *</span><textarea id="audit-markdown" name="markdown" style="height:320px" required placeholder="粘贴完整 Markdown 文档，或选择上方 .md/.txt 文件自动填入"></textarea></label><div class="notice">审核只读原文，不修改原文档；报告可导出 Markdown/DOCX/ZIP。过长文档审核耗时相应增加。</div><div class="form-actions"><button type="button" class="secondary" data-close>取消</button><button class="primary" type="submit">导入并开始审核 →</button></div></form>`);
+  $('#audit-file').addEventListener('change', async (event) => {
+    const file = event.target.files[0]; if (!file) return;
+    if (file.size > 2 * 1024 * 1024) { toast('文件超过 2 MiB 限制'); event.target.value = ''; return; }
+    $('#audit-markdown').value = await file.text();
+  });
+  $('#audit-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const data = Object.fromEntries(new FormData(event.target));
+    const button = event.target.querySelector('[type=submit]'); button.disabled = true; button.textContent = '正在导入并启动审核…';
+    try { const result = await api('/api/projects/audit', { method: 'POST', body: JSON.stringify(data) }); closeModal(); await refreshProjects(); await loadProject(result.project.id); } catch (error) { toast(error.message); button.disabled = false; button.textContent = '导入并开始审核 →'; }
+  });
+}
+
 function settingsModal(role = state.role) {
   state.role = role; const s = state.settings[role];
   openModal(`<h2 id="modal-title">Agent 与搜索设置</h2><p class="modal-intro">每个角色独立配置。更改只影响后续执行；已保存的阶段快照不会被改写。</p><div class="settings-layout"><div class="role-list">${Object.entries(roles).map(([key, value]) => `<button data-role="${key}" class="${key === role ? 'active' : ''}">${value}</button>`).join('')}</div><form id="settings-form" class="setting-form"><div class="field-row"><label class="field"><span>模型</span><input name="model" value="${esc(s.model)}" required></label><label class="field"><span>Base URL</span><input name="base_url" value="${esc(s.base_url)}" required></label></div><div class="field-row"><label class="field"><span>温度</span><input name="temperature" type="number" min="0" max="2" step="0.1" value="${s.temperature}"></label><label class="field"><span>最大输出 Tokens</span><input name="max_tokens" type="number" min="512" max="65536" value="${s.max_tokens}"></label><label class="field"><span>思考模式</span><input name="thinking" value="${esc(s.thinking||'enabled')}" readonly class="readonly-field"><small>按当前策略强制开启（enabled）；输出预算已配 64K。</small></label></div><label class="field"><span>密钥环境变量名</span><input name="api_key_env" value="${esc(s.api_key_env)}"><small>显式保存的本地密钥优先；未保存时读取此环境变量。</small></label>${role === 'writer' ? `<label class="field"><span>视觉标注模型</span><input name="vision_model" value="${esc(s.vision_model || 'deepseek-flash')}"><small>仅用于观察已下载参考图并选择标注位置。</small></label>` : ''}<label class="field"><span>API Key ${s.key_configured ? '（已配置，留空保持不变）' : '（待配置）'}</span><input name="api_key" type="password" autocomplete="off" placeholder="不会回显、不会导出"></label><label class="field"><span>Skill 名称（逗号分隔）</span><input name="skills" value="${esc(s.skills.join(', '))}"></label><label class="field"><span>系统提示词</span><textarea name="prompt">${esc(s.prompt)}</textarea></label><div class="form-actions"><button class="primary" type="submit">保存此角色</button></div></form></div><div class="settings-footer"><h3>豆包图片搜索</h3><form id="search-key-form" class="field-row"><label class="field"><span>WEB_SEARCH_API_KEY</span><input name="api_key" type="password" placeholder="图片搜索专用密钥" autocomplete="off"></label><div class="form-actions"><button class="secondary" type="submit">保存搜索密钥</button></div></form><div class="notice">DeepSeek 用于模型、网页检索与抓取；豆包用于图片检索。图片仅作研究参考，请核对使用授权。参考图标注使用 writer 的 vision_model（默认 deepseek-flash）。</div></div>`, true);
@@ -184,10 +224,10 @@ function revisionModal() {
   $('#revision-form').onsubmit = (event) => { event.preventDefault(); action(`/api/projects/${state.project.id}/revision`, '正在分析修改影响范围', Object.fromEntries(new FormData(event.target)), true); };
 }
 function exportModal() {
-  openModal(`<h2 id="modal-title">交付文档与资料</h2><p class="modal-intro">将定稿 Markdown、DOCX、检索证据、图片与图示、审核历史和来源清单一并整理。审核通过才会生成定稿。</p><div class="notice">参考图片用于设计研究，可检索不代表获得再发布授权。交付前请核查来源与使用范围。</div><div class="form-actions"><button class="primary" id="generate-export">生成并整理交付包</button></div><div id="download-links"></div>`);
+  openModal(`<h2 id="modal-title">${state.project?.artifacts?.project_type === 'document_review' ? '导出审核报告' : '交付文档与资料'}</h2><p class="modal-intro">${state.project?.artifacts?.project_type === 'document_review' ? '导出结构审核报告（Markdown/DOCX）与完整资料包。' : '将定稿 Markdown、DOCX、检索证据、图片与图示、审核历史和来源清单一并整理。审核通过才会生成定稿。'}</p><div class="notice">参考图片用于设计研究，可检索不代表获得再发布授权。交付前请核查来源与使用范围。</div><div class="form-actions"><button class="primary" id="generate-export">生成并整理交付包</button></div><div id="download-links"></div>`);
   $('#generate-export').onclick = async () => { const button = $('#generate-export'); button.disabled = true; button.textContent = '正在生成 DOCX 与归档…'; try { const data = await api(`/api/projects/${state.project.id}/export`); $('#download-links').innerHTML = `<p class="modal-intro">已保存至：${esc(data.directory)}</p><div class="form-actions"><a class="secondary" href="/api/projects/${state.project.id}/download/markdown">Markdown</a><a class="secondary" href="/api/projects/${state.project.id}/download/docx">DOCX</a><a class="primary" href="/api/projects/${state.project.id}/download/zip">完整资料 ZIP</a></div>`; button.hidden = true; } catch (error) { toast(error.message); button.disabled = false; button.textContent = '生成并整理交付包'; } };
 }
-$('#new-project').onclick = newProject; $('.brand').onclick = (e) => { e.preventDefault(); showHome(); }; $('#back-home').onclick = showHome; $('#open-settings').onclick = () => settingsModal(); $('#revise-project').onclick = revisionModal; $('#export-project').onclick = exportModal;
+$('#new-project').onclick = newProject; $('#audit-project').onclick = auditProjectModal; $('.brand').onclick = (e) => { e.preventDefault(); showHome(); }; $('#back-home').onclick = showHome; $('#open-settings').onclick = () => settingsModal(); const reviseButton = $('#revise-project'); reviseButton.style.display = p.artifacts.project_type === 'document_review' ? 'none' : ''; reviseButton.onclick = revisionModal; $('#export-project').onclick = exportModal;
 $('#autorun-toggle').onclick = async () => {
   const p = state.project; if (!p) return;
   const enable = !(state.detail && state.detail.autorun);

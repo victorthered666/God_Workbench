@@ -22,6 +22,7 @@ pub fn app(repo: Repository, secrets: SecretStore, workflow: Workflow, runner: R
         .route("/api/bootstrap",get(bootstrap))
         .route("/api/health",get(health))
         .route("/api/projects",post(create))
+        .route("/api/projects/audit",post(create_audit))
         .route("/api/projects/{id}",get(project))
         .route("/api/projects/{id}/stages/{stage}/feedback",post(feedback))
         .route("/api/projects/{id}/stages/{stage}/approve",post(approve))
@@ -72,6 +73,15 @@ async fn create(State(state): State<AppState>, Json(request): Json<ProjectCreate
     if request.name.trim().is_empty() || request.purpose.trim().is_empty() || request.references.trim().is_empty() || request.name.chars().count()>120 || request.purpose.len()>12000 || request.references.len()>12000 { return Err(AppError::Invalid("文档名称、设计目的和参考对象为必填项，且不能超过长度限制".into())); }
     let project=state.workflow.create(&request)?;
     state.runner.start(project.id.clone(),"research".into(),String::new())?;
+    Ok((StatusCode::CREATED,Json(json!({"project":state.repo.require(&project.id)?}))))
+}
+
+async fn create_audit(State(state): State<AppState>, Json(request): Json<crate::domain::ProjectAuditCreate>) -> Result<(StatusCode,Json<Value>)> {
+    if request.name.trim().is_empty() || request.name.chars().count()>120 { return Err(AppError::Invalid("文档名称必填且不超过 120 字".into())); }
+    if request.markdown.trim().is_empty() { return Err(AppError::Invalid("导入的文档内容不能为空".into())); }
+    if request.markdown.len()>2*1024*1024 { return Err(AppError::Invalid("导入文档超过 2 MiB 限制".into())); }
+    let project=state.workflow.create_audit(&request)?;
+    state.runner.start(project.id.clone(),"audit".into(),String::new())?;
     Ok((StatusCode::CREATED,Json(json!({"project":state.repo.require(&project.id)?}))))
 }
 
@@ -150,13 +160,19 @@ async fn asset(State(state): State<AppState>, Path(id): Path<String>, Query(quer
 
 async fn export(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>> {
     let project=state.repo.require(&id)?;
-    if project.status!="approved" || !project.approved("review") { return Err(AppError::Workflow("架构审核尚未通过，不能标记为定稿导出".into())); }
+    let audit_type=project.artifacts.get("project_type").and_then(Value::as_str)==Some("document_review");
+    if audit_type {
+        if project.status!="audit_done" { return Err(AppError::Workflow("结构审核完成后再导出报告".into())); }
+    } else if project.status!="approved" || !project.approved("review") {
+        return Err(AppError::Workflow("架构审核尚未通过，不能标记为定稿导出".into()));
+    }
     Ok(Json(crate::export::package::export(&state.repo,&project)?))
 }
 
 async fn download(State(state): State<AppState>, Path((id,kind)): Path<(String,String)>) -> Result<Response> {
     let project=state.repo.require(&id)?;
-    if project.status!="approved" { return Err(AppError::Workflow("审核通过并导出后才能下载".into())); }
+    let audit_type=project.artifacts.get("project_type").and_then(Value::as_str)==Some("document_review");
+    if project.status!="approved" && !(audit_type && project.status=="audit_done") { return Err(AppError::Workflow("审核通过并导出后才能下载".into())); }
     let title=safe_name(&project.name);
     let filename=match kind.as_str() { "markdown"=>format!("{title}.md"),"docx"=>format!("{title}.docx"),"zip"=>format!("{title}-v{}.zip",project.revision),_=>return Err(AppError::Invalid("未知下载格式".into())) };
     let path=project.working_dir()?.join(&filename);
