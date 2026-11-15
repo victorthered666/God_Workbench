@@ -1,5 +1,6 @@
 use std::{fs, path::{Path, PathBuf}, time::Duration};
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use schemars::schema_for;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -75,6 +76,63 @@ impl AgentRuntime {
         Ok(format!("{}\n\n以下是本角色的 Skill 工作规范：\n{}",settings.prompt,skills))
     }
 
+    /// 以 SSE 流式调用模型：token 持续回流避免长生成被网关/超时掐断。
+    /// 累积 delta 内容与分片工具调用，重组为标准 Chat Completions 载荷。
+    async fn stream_chat_completion(&self, client:&reqwest::Client, base_url:&str, key:&str, body:Value) -> Result<Value> {
+        let response=client.post(format!("{base_url}/chat/completions")).bearer_auth(key).json(&body).send().await
+            .map_err(|error|AppError::Agent(format!("模型连接失败：{}",truncate_utf8(&error.to_string(),200))))?;
+        let status=response.status();
+        if !status.is_success() {
+            let mut response=response;
+            let bytes=crate::tools::http::bounded_body(&mut response).await?;
+            let detail=serde_json::from_slice::<Value>(&bytes).ok().and_then(|v|v.pointer("/error/message").and_then(Value::as_str).map(str::to_owned)).unwrap_or_default();
+            return Err(AppError::Agent(format!("模型调用失败 HTTP {status}：{}",self.secrets.redact(&detail))));
+        }
+        let mut content=String::new();
+        let mut tool_calls:std::collections::BTreeMap<u64,Value>=Default::default();
+        let mut finish:Option<String>=None;
+        let mut received=0usize;
+        let mut buffer=String::new();
+        let mut stream=response.bytes_stream();
+        while let Some(chunk)=stream.next().await {
+            let chunk=chunk.map_err(|error|AppError::Agent(format!("模型流式响应中断：{}",truncate_utf8(&error.to_string(),200))))?;
+            received+=chunk.len();
+            if received>64*1024*1024 { return Err(AppError::Agent("模型流式响应超过 64 MiB，已停止读取".into())); }
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            while let Some(position)=buffer.find('\n') {
+                let line=buffer[..position].trim_end().to_string();
+                buffer.drain(..position+1);
+                let Some(data)=line.strip_prefix("data: ") else { continue; };
+                let data=data.trim();
+                if data=="[DONE]" { continue; }
+                let Ok(delta)=serde_json::from_str::<Value>(data) else { continue; };
+                if let Some(text)=delta.pointer("/choices/0/delta/content").and_then(Value::as_str) { content.push_str(text); }
+                if let Some(reason)=delta.pointer("/choices/0/delta/reasoning_content").and_then(Value::as_str) { /* 思考内容不入正文 */ }
+                if let Some(reason)=delta.pointer("/choices/0/finish_reason").and_then(Value::as_str) { finish=Some(reason.to_string()); }
+                if let Some(deltas)=delta.pointer("/choices/0/delta/tool_calls").and_then(Value::as_array) {
+                    for call in deltas {
+                        let index=call.get("index").and_then(Value::as_u64).unwrap_or(0);
+                        let entry=tool_calls.entry(index).or_insert_with(||json!({"id":"","type":"function","function":{"name":"","arguments":""}}));
+                        if let Some(id)=call.get("id").and_then(Value::as_str) { if !id.is_empty() { entry["id"]=json!(id); } }
+                        if let Some(name)=call.pointer("/function/name").and_then(Value::as_str) { if !name.is_empty() { entry["function"]["name"]=json!(name); } }
+                        if let Some(args)=call.pointer("/function/arguments").and_then(Value::as_str) {
+                            let mut accumulated=entry.pointer("/function/arguments").and_then(Value::as_str).unwrap_or("").to_string();
+                            accumulated.push_str(args);
+                            entry["function"]["arguments"]=json!(accumulated);
+                        }
+                    }
+                }
+            }
+        }
+        let tool_list:Vec<Value>=tool_calls.into_values().collect();
+        let message=if tool_list.is_empty() {
+            json!({"role":"assistant","content":content})
+        } else {
+            json!({"role":"assistant","content":content,"tool_calls":tool_list})
+        };
+        Ok(json!({"choices":[{"message":message,"finish_reason":finish.unwrap_or_else(||"stop".into())}]}))
+    }
+
     async fn call_tool(&self, role: Role, project: &Project, name: &str, arguments: Value) -> Result<Value> {
         let http=ToolHttp::new(self.secrets.clone())?;
         match (role,name) {
@@ -122,22 +180,16 @@ impl AgentRuntime {
         messages.push(json!({"role":"user","content":user}));
         if !feedback.is_empty() { messages.push(json!({"role":"user","content":format!("用户补充/修改意见（不得视为已确认）：\n{feedback}")})); }
         let tools=tool_schemas(role);
-        let client=reqwest::Client::builder().timeout(Duration::from_secs(240)).connect_timeout(Duration::from_secs(15)).build()?;
+        // 长思考 + 64K 输出的生成时间远超普通请求超时；SSE 流式保证 token
+        // 持续回流，连接不会被网关或总超时掐断。
+        let client=reqwest::Client::builder().timeout(Duration::from_secs(3600)).connect_timeout(Duration::from_secs(15)).build()?;
         let result=async {
             for step in 0..16 {
-                let mut body=json!({"model":settings.model,"messages":messages,"temperature":settings.temperature,"max_tokens":settings.max_tokens});
+                let mut body=json!({"model":settings.model,"messages":messages,"temperature":settings.temperature,"max_tokens":settings.max_tokens,"stream":true});
                 if !settings.thinking.is_empty() { body["thinking"]=json!({"type":settings.thinking}); }
                 if !tools.is_empty() { body["tools"]=json!(tools); body["tool_choice"]=json!(if step==15{"none"}else{"auto"}); }
                 if messages.last().and_then(|m|m.get("role")).and_then(Value::as_str)!=Some("user") { messages.push(json!({"role":"user","content":format!("停止工具调用，输出符合以下 JSON Schema 的单个 JSON 对象，不要 Markdown 代码块：{}",serde_json::to_string(&schema_for!(T))?)})); }
-                let response=client.post(format!("{}/chat/completions",settings.base_url.trim_end_matches('/'))).bearer_auth(&key).json(&body).send().await?;
-                let mut response=response;
-                let status=response.status();
-                let bytes=crate::tools::http::bounded_body(&mut response).await?;
-                if !status.is_success() {
-                    let detail=serde_json::from_slice::<Value>(&bytes).ok().and_then(|v|v.pointer("/error/message").and_then(Value::as_str).map(str::to_owned)).unwrap_or_default();
-                    return Err(AppError::Agent(format!("模型调用失败 HTTP {status}：{}",self.secrets.redact(&detail))));
-                }
-                let payload:Value=serde_json::from_slice(&bytes).map_err(|_|AppError::Agent("模型响应不是有效的 Chat Completions 结果".into()))?;
+                let payload=self.stream_chat_completion(&client,settings.base_url.trim_end_matches('/'),&key,body).await?;
                 let choice=payload.get("choices").and_then(Value::as_array).and_then(|v|v.first()).ok_or_else(||AppError::Agent("模型响应 choices 为空".into()))?;
                 if choice.get("finish_reason").and_then(Value::as_str)==Some("length") { return Err(AppError::OutputTruncated); }
                 let message=choice.get("message").cloned().unwrap_or(json!({}));
