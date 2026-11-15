@@ -55,7 +55,10 @@ impl AgentRuntime {
         if let Some(values)=saved.as_object() { for (key,value) in values { if key!="api_key" { merged[key]=value.clone(); } } }
         let mut settings:AgentSettings=serde_json::from_value(merged)?;
         if !(0.0..=2.0).contains(&settings.temperature) || !(512..=65536).contains(&settings.max_tokens) || settings.base_url.is_empty() { return Err(AppError::Agent("模型参数配置不合法".into())); }
-        if !matches!(settings.thinking.as_str(), "" | "enabled" | "disabled") { return Err(AppError::Agent("thinking 只能为空、enabled 或 disabled".into())); }
+        if settings.thinking.is_empty() { settings.thinking = "enabled".into(); }
+        if settings.thinking != "enabled" { return Err(AppError::Agent("按当前策略思考模式必须开启（enabled）；如需关闭请在配置策略中解除限制".into())); }
+        // 思考 token 计入输出预算；保底 64K 防止长文档推理挤占内容空间。
+        if settings.max_tokens<65536 { settings.max_tokens=65536; }
         if settings.base_url.starts_with("http://") && !settings.base_url.starts_with("http://127.0.0.1") && !settings.base_url.starts_with("http://localhost") { return Err(AppError::Agent("模型 Base URL 必须使用 HTTPS".into())); }
         let prompt=self.repo.setting(&format!("prompt:{}",role.as_str()),Value::String(fs::read_to_string(self.root.join(format!("agents/{}.md",role.as_str())))?))?;
         settings.prompt=prompt.as_str().unwrap_or_default().to_string();

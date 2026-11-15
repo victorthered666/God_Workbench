@@ -103,7 +103,7 @@ fn default_base_url() -> String { "https://api.deepseek.com".into() }
 fn default_key_env() -> String { "DEEPSEEK_API_KEY".into() }
 fn default_temperature() -> f64 { 0.3 }
 fn default_tokens() -> u32 { 16000 }
-fn default_thinking() -> String { "disabled".into() }
+fn default_thinking() -> String { "enabled".into() }
 fn default_vision_model() -> String { "deepseek-flash".into() }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
