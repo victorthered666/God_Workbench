@@ -183,12 +183,12 @@ function splitCardHtml(p) {
   if (!split.recommended) return `<div class="notice"><b>撰写前拆分评估：</b>预估正文约 ${pages} 页，在单份文档 ${esc(String(split.page_limit))} 页上限内，可按单文档撰写。</div>`;
   const acknowledged = !!p.artifacts?.split_acknowledged?.content;
   const executed = p.artifacts?.split_executed?.content;
-  const parts = (split.parts || []).map((part) => `<div class="finding"><strong>${esc(part.name)} · ${esc(part.title)}</strong><small> · 预估 ${esc(String(part.estimated_pages))} 页</small><p>章节：${(part.section_ids || []).map(esc).join('、')}</p></div>`).join('');
+  const parts = (split.parts || []).map((part) => `<div class="finding"><strong>${esc(part.name)}</strong><small> · ${part.role === 'master' ? '总文档（统领口径）' : `分文档 · 模块「${esc(part.module)}」`} · 预估 ${esc(String(part.estimated_pages))} 页</small><p>${esc(part.title)}</p><p>章节：${(part.section_ids || []).map(esc).join('、')}</p></div>`).join('');
   const actions = executed
-    ? `<div class="form-actions"><p class="modal-intro">已创建 ${executed.length} 个分卷项目；父项目可改写为总纲或删除。</p>${(executed || []).map((c) => `<p><a href="#" class="jump-split" data-id="${esc(c.id)}">${esc(c.name)}</a></p>`).join('')}</div>`
-    : `<div class="gate-actions"><button class="primary" id="create-split">按建议创建分卷项目</button><button class="secondary" id="ack-split">仍按单文档撰写（已知晓超页风险）</button></div>`;
+    ? `<div class="form-actions"><p class="modal-intro">已创建 ${executed.length} 个子文档项目（总文档-分文档结构）；父项目可改写为总纲或删除。</p>${(executed || []).map((c) => `<p><a href="#" class="jump-split" data-id="${esc(c.id)}">${esc(c.name)}</a></p>`).join('')}</div>`
+    : `<div class="gate-actions"><button class="primary" id="create-split">按建议创建子文档项目</button><button class="secondary" id="ack-split">仍按单文档撰写（已知晓超页风险）</button></div>`;
   const ackNote = acknowledged && !executed ? `<p class="modal-intro">已记录：你选择按单文档继续撰写。</p>` : '';
-  return `<div class="notice" style="border-left-color:#BF593B"><b>⚠️ 撰写前拆分评估：建议拆分为 ${split.parts.length} 卷</b><br>${esc(split.advice)}</div>${parts}${actions}${ackNote}`;
+  return `<div class="notice" style="border-left-color:#BF593B"><b>⚠️ 撰写前拆分评估：建议采用「总文档-分文档」结构（共 ${split.parts.length} 份）</b><br>${esc(split.advice)}</div>${parts}${actions}${ackNote}`;
 }
 function reviewHtml(data) { return `<div class="notice"><b>${data.approved ? '✓ 审核通过' : '审核未通过'}</b><br>${esc(data.summary)}</div>${(data.findings || []).map((f) => `<div class="review-item"><strong>${esc(f.section)} · ${esc(f.severity)} · ${roles[f.owner]}</strong><p>${esc(f.problem)}</p><p>修订建议：${esc(f.recommendation)}</p></div>`).join('')}`; }
 function editGate(stage, content) {

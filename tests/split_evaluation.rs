@@ -103,8 +103,8 @@ async fn undersized_framework_advises_single_document() {
 #[tokio::test]
 async fn string_page_estimates_are_parsed_leniently() {
     let plan=gdd_harness::domain::SplitPlan::evaluate(&[
-        gdd_harness::domain::FrameworkSection{id:"a".into(),title:"甲".into(),purpose:"p".into(),requirements:vec![],visuals:vec![],acceptance:vec![],estimated_pages:8.0},
-        gdd_harness::domain::FrameworkSection{id:"b".into(),title:"乙".into(),purpose:"p".into(),requirements:vec![],visuals:vec![],acceptance:vec![],estimated_pages:28.0},
+        gdd_harness::domain::FrameworkSection{id:"a".into(),title:"甲".into(),purpose:"p".into(),requirements:vec![],visuals:vec![],acceptance:vec![],estimated_pages:8.0,module:String::new()},
+        gdd_harness::domain::FrameworkSection{id:"b".into(),title:"乙".into(),purpose:"p".into(),requirements:vec![],visuals:vec![],acceptance:vec![],estimated_pages:28.0,module:String::new()},
     ]);
     assert_eq!(plan.estimated_total_pages,36.0);
     assert!(plan.recommended);
@@ -120,7 +120,7 @@ async fn dense_document_packing_avoids_oversized_final_part() {
         id:format!("s{i:02}"),title:format!("第{i}章 系统规则密度"),purpose:"p".into(),
         requirements:(0..6).map(|j|format!("要求{i}-{j}")).collect(),
         visuals:vec![],acceptance:(0..5).map(|j|format!("验收{i}-{j}")).collect(),
-        estimated_pages:11.0,
+        estimated_pages:11.0,module:String::new(),
     }).collect();
     let plan=gdd_harness::domain::SplitPlan::evaluate(&sections);
     assert!(plan.recommended);
@@ -150,14 +150,64 @@ async fn split_project_creates_sub_projects() {
     assert!(created.len()>=2);
     for project in &created {
         assert!(project.name.contains("拆分测试"),"子项目名继承父名：{}",project.name);
-        assert!(project.name.contains("卷"),"子项目名含卷号：{}",project.name);
-        assert!(project.purpose.contains("拆分撰写卷") && project.purpose.contains("【"),"目的含本卷章节清单");
+        assert!(project.name.contains("拆分测试"),"子项目名继承父名：{}",project.name);
+        assert!(project.purpose.contains("【"),"目的含本卷章节清单");
         assert!(project.purpose.contains("要求："),"目的携带框架要求条目");
     }
     let parent=repo.require(&id).unwrap();
     assert_eq!(parent.artifacts["split_executed"].as_array().unwrap().len(),created.len());
-    assert!(repo.events(&id).unwrap().iter().any(|e|e["message"].as_str().map(|m|m.contains("分卷项目")).unwrap_or(false)));
+    assert!(repo.events(&id).unwrap().iter().any(|e|e["message"].as_str().map(|m|m.contains("子文档项目")).unwrap_or(false)));
     // 知悉接口落标记
     workflow.acknowledge_split(&id).unwrap();
     assert_eq!(repo.require(&id).unwrap().artifacts["split_acknowledged"],json!(true));
+}
+
+/// 有模型 module 标注时按内容模块聚类：总纲聚成总文档、模块各成分文档、
+/// 超预算模块再按页数切上/下；总文档必须排第一。
+#[tokio::test]
+async fn module_labels_cluster_into_master_and_sub_documents() {
+    let section=|id:&str,title:&str,module:&str,pages:f32|gdd_harness::domain::FrameworkSection{
+        id:id.into(),title:title.into(),purpose:"p".into(),requirements:vec![],visuals:vec![],acceptance:vec![],
+        estimated_pages:pages,module:module.into()};
+    let plan=gdd_harness::domain::SplitPlan::evaluate(&[
+        section("a","设计目的与范围","总纲",3.0),
+        section("b","数值预算与乘区总表","总纲",3.0),
+        section("c","武器形态与连招树","武器形态系统",12.0),
+        section("d","架势切换与识破边界","武器形态系统",12.0),
+        section("e","武器异常与防误触","武器形态系统",12.0),
+        section("f","敌人分档与韧性","敌人与Boss系统",6.0),
+        section("g","Boss处决规则","敌人与Boss系统",6.0),
+    ]);
+    assert!(plan.recommended);
+    assert_eq!(plan.parts.len(),4,"总纲 + 武器(36页切上下) + 敌人：{:?}",plan.parts.iter().map(|p|p.name.clone()).collect::<Vec<_>>());
+    let master=&plan.parts[0];
+    assert_eq!(master.role,"master");
+    assert_eq!(master.name,"总纲");
+    assert_eq!(master.section_ids,vec!["a".to_string(),"b".to_string()]);
+    let weapon_parts:Vec<_>=plan.parts.iter().filter(|p|p.module=="武器形态系统").collect();
+    assert_eq!(weapon_parts.len(),2,"36 页模块切成上/下");
+    assert_eq!(weapon_parts[0].name,"武器形态系统·上");
+    assert_eq!(weapon_parts[1].name,"武器形态系统·下");
+    assert!(plan.parts.iter().all(|p|p.estimated_pages<=30.0+0.1),"每份不超过 30 页上限：{:?}",plan.parts.iter().map(|p|p.estimated_pages).collect::<Vec<_>>());
+    assert_eq!(plan.parts.iter().map(|p|p.estimated_pages as i32).sum::<i32>(),54,"页数守恒");
+}
+
+/// 无模型标注时按标题关键词兜底分类，且始终保证总文档-分文档结构。
+#[tokio::test]
+async fn keyword_classifier_fallback_keeps_master_structure() {
+    let section=|id:&str,title:&str,pages:f32|gdd_harness::domain::FrameworkSection{
+        id:id.into(),title:title.into(),purpose:"p".into(),requirements:vec![],visuals:vec![],acceptance:vec![],
+        estimated_pages:pages,module:String::new()};
+    let plan=gdd_harness::domain::SplitPlan::evaluate(&[
+        section("a","核心循环与资源模型",8.0),
+        section("b","武器形态与连招树",12.0),
+        section("c","敌人分档与Boss韧性",10.0),
+        section("d","神秘子系统",9.0),
+    ]);
+    assert!(plan.recommended);
+    assert_eq!(plan.parts[0].role,"master","核心循环命中的总纲关键词聚成总文档：{}",plan.parts[0].name);
+    assert_eq!(plan.parts[0].name,"总纲");
+    let modules:Vec<&str>=plan.parts.iter().filter(|p|p.role=="module").map(|p|p.module.as_str()).collect();
+    assert!(modules.contains(&"武器与形态系统") && modules.contains(&"敌人与Boss系统") && modules.contains(&"扩展系统"),
+        "无标注章节按关键词归类：{modules:?}");
 }

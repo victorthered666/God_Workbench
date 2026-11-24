@@ -184,7 +184,7 @@ impl Workflow {
 
     async fn framework(&self, project: &Project, feedback: &str) -> Result<()> {
         if !project.approved("research") { return Err(AppError::Workflow("调研意见尚未由用户确认".into())); }
-        let instruction=format!("根据用户已确认的调研意见形成可执行 GDD 框架。\n{}\n修改影响计划（如有）：{}\n章节 id 使用稳定英文短横线格式，每章给出 estimated_pages（该章撰写成文的预估页数，正文不含附录，按要求/验收/图示密度宁可高估）。输出 Framework JSON。框架自检清单（输出前逐项确认，任何一条不满足就先修正）：1) 同一机制的规则与数值在多处描述不得自相矛盾；2) 引用的章节/表号/小节必须真实存在；3) 数值上限或保护规则不得与具体动作的无敌帧/霸体等既有设定冲突；4) 互斥条件必须真实成立；5) 每条验收标准可测试、可执行；6) 各章 estimated_pages 之和若超过 30 页，必须在框架里显式收敛篇幅（合并次要章、下放细节到验收表），无法收敛时如实给出高估页数，由拆分评估向用户建议分卷。",project.artifact("research").unwrap_or(&json!({})),project.artifact("revision_plan").unwrap_or(&json!({})));
+        let instruction=format!("根据用户已确认的调研意见形成可执行 GDD 框架。\n{}\n修改影响计划（如有）：{}\n章节 id 使用稳定英文短横线格式，每章给出 estimated_pages（该章撰写成文的预估页数，正文不含附录，按要求/验收/图示密度宁可高估）。输出 Framework JSON。框架自检清单（输出前逐项确认，任何一条不满足就先修正）：1) 同一机制的规则与数值在多处描述不得自相矛盾；2) 引用的章节/表号/小节必须真实存在；3) 数值上限或保护规则不得与具体动作的无敌帧/霸体等既有设定冲突；4) 互斥条件必须真实成立；5) 每条验收标准可测试、可执行；6) 各章 estimated_pages 之和若超过 30 页，必须显式收敛篇幅，无法收敛时如实给出高估页数，并为每章标注 module 归属——设计目的、核心循环、资源模型、数值总表、术语规范、验收总口径等统领性章节一律标「总纲」，其余按内容内聚聚合成模块并使用完全一致的模块短名（如「武器形态系统」「敌人与Boss系统」），拆分评估将以「总文档-分文档」结构向用户建议；不超过 30 页时 module 留空。",project.artifact("research").unwrap_or(&json!({})),project.artifact("revision_plan").unwrap_or(&json!({})));
         let result=self.agents.run(AgentTask::Framework,project,instruction,feedback).await?;
         // 撰写前拆分评估：单份文档不应超过 30 页；必然超过则生成分卷建议，
         // 在框架确认闸门上展示，由用户决定拆分或知悉后继续。
@@ -461,7 +461,7 @@ owner 归属标准：正文措辞/数值/引用/表格类矛盾归 writer（可�
         Ok(())
     }
 
-    /// 拆分评估建议分卷时，一键按建议创建子文档项目（每卷独立走五角色流水线）。
+    /// 拆分评估建议「总文档-分文档」结构时，一键按建议创建子文档项目（各自走五角色流水线）。
     pub fn split_project(&self, project_id: &str) -> Result<Vec<Project>> {
         let project=self.repo.require(project_id)?;
         if project.running() { return Err(AppError::Workflow("任务运行时不能拆分".into())); }
@@ -474,7 +474,11 @@ owner 归属标准：正文措辞/数值/引用/表格类矛盾归 writer（可�
         let mut created=Vec::new();
         for part in &plan.parts {
             let sections:Vec<&crate::domain::FrameworkSection>=framework.sections.iter().filter(|s|part.section_ids.contains(&s.id)).collect();
-            let mut purpose=format!("《{}》{}（{}）：本卷为拆分撰写卷，与总纲及其他分卷协调数值与引用。本卷章节：",project.name,part.name,part.title);
+            let mut purpose=if part.role=="master" {
+                format!("《{}》总纲（总文档）：统领各分文档的核心约定——数值总表、术语、验收总口径以本文为准，各分文档引用本文口径、不得私自另立数值。本卷章节：",project.name)
+            } else {
+                format!("《{}》{}（分文档 · 模块「{}」）：本分文档按模块「{}」撰写，数值与术语一律引用总纲口径，与总纲及其他分文档协调引用关系。本卷章节：",project.name,part.name,part.module,part.module)
+            };
             for section in &sections {
                 purpose.push_str(&format!("\n【{}】{}",section.title,section.purpose));
                 for requirement in &section.requirements { purpose.push_str(&format!("\n- 要求：{requirement}")); }
@@ -482,7 +486,7 @@ owner 归属标准：正文措辞/数值/引用/表格类矛盾归 writer（可�
             }
             purpose=crate::paths::truncate_utf8(&purpose,11000).to_string();
             let data=crate::domain::ProjectCreate{
-                name:crate::paths::truncate_utf8(&format!("{}·{} {}",project.name,part.name,part.title),90).to_string(),
+                name:crate::paths::truncate_utf8(&format!("{}·{}",project.name,part.name),90).to_string(),
                 purpose, references:project.reference_text.clone(),
                 platform:project.platform.clone(), audience:project.audience.clone(),
             };
@@ -491,7 +495,7 @@ owner 归属标准：正文措辞/数值/引用/表格类矛盾归 writer（可�
         let mut artifacts=project.artifacts.clone();
         artifacts["split_executed"]=json!(created.iter().map(|p|json!({"id":p.id,"name":p.name})).collect::<Vec<_>>());
         self.repo.update(project_id,None,Some(artifacts),None,None,None)?;
-        self.repo.event(project_id,"gate",&format!("已按拆分建议创建 {} 个分卷项目；父项目可改写为总纲或删除",created.len()))?;
+        self.repo.event(project_id,"gate",&format!("已按拆分建议创建 {} 个子文档项目（总文档-分文档结构）；父项目可改写为总纲或删除",created.len()))?;
         Ok(created)
     }
 

@@ -159,6 +159,10 @@ pub struct FrameworkSection {
     /// 该章撰写完成后的预估正文页数（不含附录）；模型缺省时由确定性公式兜底。
     #[serde(default, deserialize_with = "flex::number_lenient")]
     pub estimated_pages: f32,
+    /// 内容模块归属：拆分时以模块为线索聚类（如「总纲」「武器形态系统」）。
+    /// 模型缺省时按章节标题关键词兜底分类。
+    #[serde(default, deserialize_with = "flex::string_or_sequence")]
+    pub module: String,
 }
 
 /// 单份文档页数上限：撰写前拆分评估的阈值。
@@ -176,8 +180,13 @@ pub struct SplitPlan {
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SplitPart {
+    /// 「总纲」（总文档）或「模块名·上」式的分文档名。
     pub name: String,
     pub title: String,
+    /// 内容模块名；总纲部分固定为「总纲」。
+    pub module: String,
+    /// master=总文档（统领全局的核心约定），module=分文档（按内容模块聚类）。
+    pub role: String,
     pub section_ids: Vec<String>,
     pub estimated_pages: f32,
 }
@@ -186,56 +195,110 @@ impl SplitPlan {
     /// 由框架章节评估：模型预估与条目密度机械估算取较大者——
     /// 实测模型对页数系统性低估（巫师3实测 129 页，模型仅估 ~28），
     /// 密度下限（每条要求/验收/图示 ≈0.8 页，章基础 2 页）更接近真实成文篇幅。
-    /// 超过页数上限时按顺序装箱：卷数 = ceil(总页数/25)，保证单卷贴近 25 页、
-    /// 尽量不超过 30 页上限；剩余章节数等于剩余卷数时每卷强制保留至少一章。
+    /// 超过页数上限时按「总文档-分文档」结构拆分：模块归属优先取模型逐章标注
+    /// （FrameworkSection.module），缺失时按标题关键词分类兜底；总纲聚成总文档，
+    /// 其余按内容模块各成分文档；单模块超 30 页再按页数预算切分为上/中/下。
     pub fn evaluate(sections: &[FrameworkSection]) -> Self {
         let density=|section:&FrameworkSection| 2.0 + 0.8*(section.requirements.len()+section.acceptance.len()+section.visuals.len()) as f32;
-        let estimate=|section:&FrameworkSection| section.estimated_pages.max(density(section));
-        let estimates:Vec<f32>=sections.iter().map(estimate).collect();
+        let labels:Vec<String>=sections.iter().map(|section|{
+            let given=section.module.trim();
+            if !given.is_empty() { given.to_string() } else { Self::classify(&section.title).to_string() }
+        }).collect();
+        let is_master=|label:&str| label=="总纲" || label.contains("总文档") || label.contains("主文档") || label.contains("核心设计");
+        // 页数口径：模块章节取 max(模型预估, 密度下限)（模型系统性低估）；
+        // 总纲章节用模型预估——总纲本就该浓缩，密度下限会把它虚胖成多份文档。
+        let estimates:Vec<f32>=sections.iter().enumerate().map(|(index,section)|{
+            let model=section.estimated_pages;
+            if is_master(&labels[index]) && model>0.0 { model } else { model.max(density(section)) }
+        }).collect();
         let total: f32 = estimates.iter().sum();
         let recommended = total > PAGE_LIMIT;
         let mut parts:Vec<SplitPart>=Vec::new();
         if recommended {
-            let target_parts=(((total/25.0).ceil() as usize).max(2)).min(sections.len());
-            let per_part=total/target_parts as f32;
-            let mut chunk: Vec<(String,f32)>=Vec::new();
-            let mut chunk_pages=0.0;
-            let mut consumed=0usize;
-            for (index,section) in sections.iter().enumerate() {
-                let current=estimates[index];
-                let sections_after=sections.len()-index-1;
-                let parts_left_after=target_parts-parts.len()-1;
-                // 剩余章节数恰好等于剩余卷数：每卷必须至少留一章，当前卷立即收口；
-                // 中点启发式：本卷页数加上下一章的一半已超过平均目标时落袋，避免最后一卷爆仓。
-                let must_reserve=parts_left_after>0 && sections_after==parts_left_after && !chunk.is_empty();
-                let balanced=!chunk.is_empty() && chunk_pages+current*0.5>per_part;
-                if (must_reserve||balanced) && sections_after>=parts_left_after {
-                    parts.push(Self::part(parts.len(),&sections[consumed..index],&chunk));
-                    consumed=index;
-                    chunk.clear();
-                    chunk_pages=0.0;
-                }
-                chunk.push((section.id.clone(),current));
-                chunk_pages+=current;
+            // 按首次出现顺序聚合模块，保持章节顺序稳定；总纲排最前。
+            let mut order:Vec<String>=Vec::new();
+            for label in labels.iter().filter(|l|is_master(l.as_str())) { if !order.contains(label) { order.push(label.clone()); } }
+            for label in labels.iter().filter(|l|!is_master(l.as_str())) { if !order.contains(label) { order.push(label.clone()); } }
+            for label in &order {
+                let picked:Vec<usize>=(0..sections.len()).filter(|i|&labels[*i]==label).collect();
+                let role=if is_master(label) { "master" } else { "module" };
+                Self::push_parts(&mut parts,sections,&estimates,&picked,label,role);
             }
-            if !chunk.is_empty() { parts.push(Self::part(parts.len(),&sections[consumed..],&chunk)); }
+            // 兜底：无论何种框架都保证「总文档-分文档」结构——没有总纲时把第一卷升为总纲。
+            if !parts.iter().any(|p|p.role=="master") {
+                if let Some(first)=parts.first_mut() {
+                    first.role="master".into();
+                    first.module="总纲".into();
+                    first.name="总纲".into();
+                }
+            }
         }
         let advice=if recommended {
-            format!("预估正文约 {:.0} 页，超过单份文档 {:.0} 页的可读上限。建议按下方拆分为 {} 卷分别撰写：每卷是独立项目，走同一五角色流水线；先写总纲卷、后写分卷，卷间通过相互引用保持数值一致。",total,PAGE_LIMIT,parts.len())
+            let master=parts.iter().find(|p|p.role=="master").map(|p|format!("「{}」",p.name)).unwrap_or_default();
+            format!("预估正文约 {:.0} 页，超过单份文档 {:.0} 页的可读上限。建议拆分为「总文档-分文档」结构共 {} 份：{master}统领全局的核心约定（数值总表、术语、验收总口径），各分文档按内容模块独立撰写，走同一五角色流水线；分文档引用总文档口径，不得私自另立数值。",total,PAGE_LIMIT,parts.len())
         } else {
             format!("预估正文约 {:.0} 页，在单份文档 {:.0} 页的可读上限内，可按单文档撰写。",total,PAGE_LIMIT)
         };
         Self { estimated_total_pages:total, page_limit:PAGE_LIMIT as u32, recommended, advice, parts }
     }
 
-    fn part(index: usize, sections: &[FrameworkSection], chunk: &[(String,f32)]) -> SplitPart {
-        let pages: f32 = chunk.iter().map(|(_,p)|*p).sum();
-        const NAMES:[&str;16]=["卷一","卷二","卷三","卷四","卷五","卷六","卷七","卷八","卷九","卷十","卷十一","卷十二","卷十三","卷十四","卷十五","卷十六"];
-        let name=NAMES[index.min(NAMES.len()-1)].to_string();
-        let first=sections.first().map(|s|s.title.as_str()).unwrap_or("");
-        let last=sections.last().map(|s|s.title.as_str()).unwrap_or("");
-        let title=if sections.len()<=1 || first==last { first.to_string() } else { format!("{first} ~ {last}") };
-        SplitPart { name, title, section_ids: chunk.iter().map(|(id,_)|id.clone()).collect(), estimated_pages:pages }
+    /// 把一组同模块章节落成 1..N 份文档：超过 25 页预算时按 ceil(页数/25) 切上/中/下。
+    /// 中点启发式落袋：无需为「未来段位预留」设守卫——循环总会把当前章归入下一段，
+    /// 尾段由循环后无条件收口保证。
+    fn push_parts(parts:&mut Vec<SplitPart>, sections:&[FrameworkSection], estimates:&[f32], picked:&[usize], module:&str, role:&str) {
+        let total: f32=picked.iter().map(|i|estimates[*i]).sum();
+        let segment_count=((total/25.0).ceil() as usize).max(1);
+        let mut boundaries:Vec<Vec<usize>>=vec![];
+        if segment_count==1 { boundaries.push(picked.to_vec()); }
+        else {
+            let per=total/segment_count as f32;
+            let mut start=0usize; let mut chunk_pages=0.0;
+            for (k,i) in picked.iter().enumerate() {
+                let current=estimates[*i];
+                let remaining_segments=segment_count-boundaries.len()-1;
+                let remaining_items=picked.len()-k;
+                let must=remaining_segments>0 && remaining_items==remaining_segments && k>start;
+                let balanced=chunk_pages+current*0.5>per;
+                if (must||balanced) && k>start {
+                    boundaries.push(picked[start..k].to_vec()); start=k; chunk_pages=0.0;
+                }
+                chunk_pages+=current;
+            }
+            boundaries.push(picked[start..].to_vec());
+        }
+        let suffixes:Vec<String>=match boundaries.len() {
+            0|1=>vec![String::new()],
+            2=>["上","下"].iter().map(|s|format!("·{s}")).collect(),
+            3=>["上","中","下"].iter().map(|s|format!("·{s}")).collect(),
+            n=>(1..=n).map(|n|format!("（{n}）")).collect(),
+        };
+        for (index,boundary) in boundaries.into_iter().enumerate() {
+            let pages: f32=boundary.iter().map(|i|estimates[*i]).sum();
+            let picked_sections:Vec<&FrameworkSection>=boundary.iter().map(|i|&sections[*i]).collect();
+            parts.push(Self::build(parts.len(),&format!("{module}{}",suffixes[index.min(suffixes.len()-1)]),module,role,&picked_sections,pages));
+        }
+    }
+
+    fn build(index: usize, name: &str, module: &str, role: &str, picked: &[&FrameworkSection], pages: f32) -> SplitPart {
+        let first=picked.first().map(|s|s.title.as_str()).unwrap_or("");
+        let last=picked.last().map(|s|s.title.as_str()).unwrap_or("");
+        let title=if picked.len()<=1 || first==last { first.to_string() } else { format!("{first} ~ {last}") };
+        SplitPart { name: name.to_string(), title, module: module.to_string(), role: role.to_string(), section_ids: picked.iter().map(|s|s.id.clone()).collect(), estimated_pages:pages }
+    }
+
+    /// 无模型标注时的标题关键词分类器：总纲优先，其余按内容模块归类。
+    fn classify(title: &str) -> &'static str {
+        let has=|keywords:&[&str]| keywords.iter().any(|k|title.to_lowercase().contains(k));
+        if has(&["目的","定位","设计目标","受众","平台范围","术语","符号","规范","名词","阅读","指引","总览","文档结构","核心循环","循环","资源模型"]) { return "总纲"; }
+        if has(&["数值","乘区","公式","预算","总表","伤害计算"]) { return "数值规范"; }
+        if has(&["武器","形态","连招","架势","招式","攻击","识破"]) { return "武器与形态系统"; }
+        if has(&["技能","流派","天赋","联动"]) { return "技能系统"; }
+        if has(&["敌人","怪","boss","韧性","处决","行为树","分档"]) { return "敌人与Boss系统"; }
+        if has(&["装备","符文","套装","词条","物品","道具"]) { return "装备与符文系统"; }
+        if has(&["输入","手柄","键鼠","交互","hud","ui","界面","反馈","表现","提示"]) { return "输入交互与表现"; }
+        if has(&["验收","qa","测试","复算","用例","口径"]) { return "验收与QA"; }
+        if has(&["风险","降级","预案","工作量","排期","里程碑"]) { return "风险与预算"; }
+        "扩展系统"
     }
 }
 
