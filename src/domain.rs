@@ -26,6 +26,19 @@ pub mod flex {
             other => other.to_string(),
         })
     }
+
+    /// 模型可能把数值写成 "2-3页" / "3" / null：取字符串里首个数字段。
+    pub fn number_lenient<'de, D>(deserializer: D) -> Result<f32, D::Error>
+    where D: Deserializer<'de> {
+        Ok(match Value::deserialize(deserializer)? {
+            Value::Number(n) => n.as_f64().unwrap_or(0.0) as f32,
+            Value::String(text) => text.split(|c: char| !c.is_ascii_digit() && c != '.')
+                .find(|part| part.chars().any(|c| c.is_ascii_digit()))
+                .and_then(|part| part.parse::<f32>().ok())
+                .unwrap_or(0.0),
+            _ => 0.0,
+        })
+    }
 }
 pub fn id() -> String { uuid::Uuid::new_v4().simple().to_string() }
 
@@ -143,6 +156,81 @@ pub struct FrameworkSection {
     pub requirements: Vec<String>,
     #[serde(default)] pub visuals: Vec<String>,
     #[serde(default)] pub acceptance: Vec<String>,
+    /// 该章撰写完成后的预估正文页数（不含附录）；模型缺省时由确定性公式兜底。
+    #[serde(default, deserialize_with = "flex::number_lenient")]
+    pub estimated_pages: f32,
+}
+
+/// 单份文档页数上限：撰写前拆分评估的阈值。
+pub const PAGE_LIMIT: f32 = 30.0;
+
+/// 撰写前拆分评估（框架确认闸门展示）。
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SplitPlan {
+    pub estimated_total_pages: f32,
+    pub page_limit: u32,
+    pub recommended: bool,
+    pub advice: String,
+    #[serde(default)] pub parts: Vec<SplitPart>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SplitPart {
+    pub name: String,
+    pub title: String,
+    pub section_ids: Vec<String>,
+    pub estimated_pages: f32,
+}
+
+impl SplitPlan {
+    /// 由框架章节评估：模型给的 estimated_pages 优先，缺省用确定性公式兜底；
+    /// 超过页数上限时按顺序贪心装箱成 2–6 卷的拆分建议。
+    pub fn evaluate(sections: &[FrameworkSection]) -> Self {
+        let estimate=|section:&FrameworkSection| if section.estimated_pages>0.0 { section.estimated_pages }
+            else { 2.0 + 0.8*(section.requirements.len()+section.acceptance.len()+section.visuals.len()) as f32 };
+        let estimates:Vec<f32>=sections.iter().map(estimate).collect();
+        let total: f32 = estimates.iter().sum();
+        let recommended = total > PAGE_LIMIT;
+        let mut parts:Vec<SplitPart>=Vec::new();
+        if recommended {
+            let target_parts=((total/25.0).ceil() as usize).clamp(2,6);
+            let mut chunk: Vec<(String,f32)>=Vec::new();
+            let mut chunk_pages=0.0;
+            let mut consumed=0usize;
+            for (index,section) in sections.iter().enumerate() {
+                let current=estimates[index];
+                let after=sections.len()-index-1;
+                // 还有剩余卷要留位置，且本卷已接近容量：先把当前卷落袋。
+                let should_close=!chunk.is_empty() && parts.len()+1<target_parts
+                    && (chunk_pages>=PAGE_LIMIT*0.9 || (after>=target_parts-parts.len()-1 && chunk_pages+current>PAGE_LIMIT*0.85));
+                if should_close {
+                    parts.push(Self::part(parts.len(),&sections[consumed..index],&chunk));
+                    consumed=index;
+                    chunk.clear();
+                    chunk_pages=0.0;
+                }
+                chunk.push((section.id.clone(),current));
+                chunk_pages+=current;
+            }
+            if !chunk.is_empty() { parts.push(Self::part(parts.len(),&sections[consumed..],&chunk)); }
+        }
+        let advice=if recommended {
+            format!("预估正文约 {:.0} 页，超过单份文档 {:.0} 页的可读上限。建议按下方拆分为 {} 卷分别撰写：每卷是独立项目，走同一五角色流水线；先写总纲卷、后写分卷，卷间通过相互引用保持数值一致。",total,PAGE_LIMIT,parts.len())
+        } else {
+            format!("预估正文约 {:.0} 页，在单份文档 {:.0} 页的可读上限内，可按单文档撰写。",total,PAGE_LIMIT)
+        };
+        Self { estimated_total_pages:total, page_limit:PAGE_LIMIT as u32, recommended, advice, parts }
+    }
+
+    fn part(index: usize, sections: &[FrameworkSection], chunk: &[(String,f32)]) -> SplitPart {
+        let pages: f32 = chunk.iter().map(|(_,p)|*p).sum();
+        let names=["卷一","卷二","卷三","卷四","卷五","卷六"];
+        let name=names[index.min(names.len()-1)].to_string();
+        let first=sections.first().map(|s|s.title.as_str()).unwrap_or("");
+        let last=sections.last().map(|s|s.title.as_str()).unwrap_or("");
+        let title=if sections.len()<=1 || first==last { first.to_string() } else { format!("{first} ~ {last}") };
+        SplitPart { name, title, section_ids: chunk.iter().map(|(id,_)|id.clone()).collect(), estimated_pages:pages }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]

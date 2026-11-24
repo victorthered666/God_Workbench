@@ -32,6 +32,8 @@ pub fn app(repo: Repository, secrets: SecretStore, workflow: Workflow, runner: R
         .route("/api/projects/{id}/autorun",put(autorun))
         .route("/api/projects/{id}/review/acknowledge",post(acknowledge_review))
         .route("/api/projects/{id}/review/authorize-round",post(authorize_review_round))
+        .route("/api/projects/{id}/split",post(split_project))
+        .route("/api/projects/{id}/split/acknowledge",post(acknowledge_split))
         .route("/api/projects/{id}/document",put(edit_document))
         .route("/api/projects/{id}/preview",get(preview))
         .route("/api/projects/{id}/asset",get(asset))
@@ -95,6 +97,19 @@ async fn approve(State(state): State<AppState>, Path((id,stage)): Path<(String,S
     let next=state.workflow.approve(&id,&stage)?;
     state.runner.start(id.clone(),next.clone(),String::new())?;
     Ok(Json(json!({"project":state.repo.require(&id)?,"next_stage":next})))
+}
+
+/// 按拆分评估建议创建分卷子项目。
+async fn split_project(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>> {
+    let created=state.workflow.split_project(&id)?;
+    let names:Vec<&String>=created.iter().map(|p|&p.name).collect();
+    Ok(Json(json!({"created":created.iter().map(|p|json!({"id":p.id,"name":p.name})).collect::<Vec<_>>(),"count":created.len(),"names":names})))
+}
+
+/// 用户知悉拆分建议后仍按单文档撰写。
+async fn acknowledge_split(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>> {
+    state.workflow.acknowledge_split(&id)?;
+    Ok(Json(json!({"project":state.repo.require(&id)?})))
 }
 
 async fn run(State(state): State<AppState>, Path((id,stage)): Path<(String,String)>) -> Result<Json<Value>> {

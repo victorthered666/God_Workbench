@@ -139,12 +139,15 @@ function renderArtifact() {
   if (key === 'audit_report') { $('#tab-deliverable').innerHTML = auditReportHtml(content, record.version); return; }
   let html = `<div class="artifact-title"><h2>${key === 'audit_report' ? '文档审核报告' : key === 'research' ? '调研与撰写意见' : key === 'framework' ? '文档框架' : key === 'review' ? '架构审核报告' : key === 'revision_plan' ? '修改影响范围' : '当前正文'}</h2><small>版本 ${record.version}${record.approved ? ' · 已确认' : ''}</small></div>`;
   if (key === 'research') html += researchHtml(content);
-  else if (key === 'framework') html += frameworkHtml(content);
+  else if (key === 'framework') html += frameworkHtml(content) + splitCardHtml(p);
   else if (key === 'review') html += reviewHtml(content);
   else if (key === 'revision_plan') html += `<div class="artifact-section"><h3>${content.research_needed ? '需要重新调研' : '沿用已确认调研'}</h3><p>${esc(content.reason)}</p></div><div class="artifact-section"><h3>受影响章节</h3><ul>${(content.affected_sections || []).map((x) => `<li>${esc(x)}</li>`).join('')}</ul></div>`;
   else { html += `<div class="artifact-section"><p>正文已完成当前阶段处理。请在“文档预览”中查看图文内容，或在下方查看 Markdown 源稿。</p><textarea class="json-editor" readonly>${esc(content.markdown)}</textarea></div>`; }
   if (['research', 'framework', 'revision_plan'].includes(key) && ['research_review', 'framework_review', 'revision_review'].includes(p.status)) {
-    html += `<div class="gate-form"><label for="gate-feedback">补充或修改意见</label><textarea id="gate-feedback" placeholder="写下需要补充、调整或删除的内容；Agent 将继续分析，直至你确认。"></textarea><div class="gate-actions"><button class="secondary" id="manual-gate">直接编辑 JSON</button><button class="secondary" id="send-feedback">提交反馈并重做</button><button class="primary" id="approve-gate">确认并进入下一阶段 →</button></div></div>`;
+    const split = p.artifacts?.split_plan?.content;
+    const needAck = key === 'framework' && split?.recommended && !p.artifacts?.split_acknowledged?.content;
+    const approveDisabled = needAck ? 'disabled title="先处理拆分评估：创建分卷项目，或确认仍按单文档撰写"' : '';
+    html += `<div class="gate-form"><label for="gate-feedback">补充或修改意见</label><textarea id="gate-feedback" placeholder="写下需要补充、调整或删除的内容；Agent 将继续分析，直至你确认。"></textarea><div class="gate-actions"><button class="secondary" id="manual-gate">直接编辑 JSON</button><button class="secondary" id="send-feedback">提交反馈并重做</button><button class="primary" id="approve-gate" ${approveDisabled}>确认并进入下一阶段 →</button></div></div>`;
   }
   if (key === 'review' && !content.approved) {
     const hasArch = (content.findings || []).some((f) => f.owner === 'research' || f.owner === 'architect');
@@ -164,11 +167,29 @@ function renderArtifact() {
   if ($('#ack-review')) $('#ack-review').onclick = () => action(`/api/projects/${p.id}/review/acknowledge`, '已记录人工知悉；正在修订其余问题');
   if ($('#authorize-round')) $('#authorize-round').onclick = () => action(`/api/projects/${p.id}/review/authorize-round`, '已授权追加一轮；正在修订并复审');
   if ($('#goto-manual-edit')) $('#goto-manual-edit').onclick = () => { document.querySelector('[data-tab="document"]').click(); toast('已切到文档预览；点击「编辑 Markdown」人工修改后保存'); };
+  if ($('#create-split')) $('#create-split').onclick = () => action(`/api/projects/${p.id}/split`, '分卷项目已创建；可在项目列表查看');
+  if ($('#ack-split')) $('#ack-split').onclick = () => action(`/api/projects/${p.id}/split/acknowledge`, '已记录：按单文档继续撰写');
+  document.querySelectorAll('.jump-split').forEach((link) => { link.onclick = (event) => { event.preventDefault(); loadProject(link.dataset.id); }; });
 }
 function researchHtml(data) {
   return `<div class="artifact-section"><h3>方向判断</h3><p>${esc(data.summary)}</p></div><h3>参考对象分析</h3>${(data.findings || []).map((f) => `<div class="finding"><strong>${esc(f.topic)}</strong><small> · ${esc(f.confidence)} · 证据 ${(f.evidence_ids || []).map(esc).join(', ') || '无'}</small><p>${esc(f.observation)}</p><p><b>设计启示：</b>${esc(f.implication)}</p></div>`).join('')}<div class="artifact-section"><h3>具体撰写意见</h3><ul>${(data.writing_advice || []).map((x) => `<li>${esc(x)}</li>`).join('')}</ul></div><div class="artifact-section"><h3>设计建议</h3><ul>${(data.recommendations || []).map((x) => `<li>${esc(x)}</li>`).join('')}</ul></div>${(data.limitations || []).length ? `<div class="notice"><b>证据边界：</b>${data.limitations.map(esc).join('；')}</div>` : ''}`;
 }
-function frameworkHtml(data) { return `<div class="artifact-section"><p>${esc(data.summary)}</p></div>${(data.sections || []).map((s, i) => `<div class="finding"><strong>${i+1}. ${esc(s.title)}</strong><p>${esc(s.purpose)}</p><ul>${s.requirements.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>${s.visuals.length ? `<small>图示：${s.visuals.map(esc).join('；')}</small>` : ''}</div>`).join('')}`; }
+function frameworkHtml(data) { return `<div class="artifact-section"><p>${esc(data.summary)}</p></div>${(data.sections || []).map((s, i) => `<div class="finding"><strong>${i+1}. ${esc(s.title)}</strong>${s.estimated_pages ? `<small> · 预估 ${esc(String(s.estimated_pages))} 页</small>` : ''}<p>${esc(s.purpose)}</p><ul>${s.requirements.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>${s.visuals.length ? `<small>图示：${s.visuals.map(esc).join('；')}</small>` : ''}</div>`).join('')}`; }
+function splitCardHtml(p) {
+  const record = p.artifacts?.split_plan;
+  const split = record?.content;
+  if (!split) return '';
+  const pages = esc(String(split.estimated_total_pages));
+  if (!split.recommended) return `<div class="notice"><b>撰写前拆分评估：</b>预估正文约 ${pages} 页，在单份文档 ${esc(String(split.page_limit))} 页上限内，可按单文档撰写。</div>`;
+  const acknowledged = !!p.artifacts?.split_acknowledged?.content;
+  const executed = p.artifacts?.split_executed?.content;
+  const parts = (split.parts || []).map((part) => `<div class="finding"><strong>${esc(part.name)} · ${esc(part.title)}</strong><small> · 预估 ${esc(String(part.estimated_pages))} 页</small><p>章节：${(part.section_ids || []).map(esc).join('、')}</p></div>`).join('');
+  const actions = executed
+    ? `<div class="form-actions"><p class="modal-intro">已创建 ${executed.length} 个分卷项目；父项目可改写为总纲或删除。</p>${(executed || []).map((c) => `<p><a href="#" class="jump-split" data-id="${esc(c.id)}">${esc(c.name)}</a></p>`).join('')}</div>`
+    : `<div class="gate-actions"><button class="primary" id="create-split">按建议创建分卷项目</button><button class="secondary" id="ack-split">仍按单文档撰写（已知晓超页风险）</button></div>`;
+  const ackNote = acknowledged && !executed ? `<p class="modal-intro">已记录：你选择按单文档继续撰写。</p>` : '';
+  return `<div class="notice" style="border-left-color:#BF593B"><b>⚠️ 撰写前拆分评估：建议拆分为 ${split.parts.length} 卷</b><br>${esc(split.advice)}</div>${parts}${actions}${ackNote}`;
+}
 function reviewHtml(data) { return `<div class="notice"><b>${data.approved ? '✓ 审核通过' : '审核未通过'}</b><br>${esc(data.summary)}</div>${(data.findings || []).map((f) => `<div class="review-item"><strong>${esc(f.section)} · ${esc(f.severity)} · ${roles[f.owner]}</strong><p>${esc(f.problem)}</p><p>修订建议：${esc(f.recommendation)}</p></div>`).join('')}`; }
 function editGate(stage, content) {
   openModal(`<h2 id="modal-title">手动编辑阶段产物</h2><p class="modal-intro">保存前会进行结构校验；保存后仍需由你明确确认。</p><textarea id="gate-json" class="json-editor">${esc(JSON.stringify(content, null, 2))}</textarea><div class="form-actions"><button class="secondary" data-close>取消</button><button class="primary" id="save-gate">保存修改</button></div>`, true);
