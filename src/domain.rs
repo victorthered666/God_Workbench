@@ -183,27 +183,33 @@ pub struct SplitPart {
 }
 
 impl SplitPlan {
-    /// 由框架章节评估：模型给的 estimated_pages 优先，缺省用确定性公式兜底；
-    /// 超过页数上限时按顺序贪心装箱成 2–6 卷的拆分建议。
+    /// 由框架章节评估：模型预估与条目密度机械估算取较大者——
+    /// 实测模型对页数系统性低估（巫师3实测 129 页，模型仅估 ~28），
+    /// 密度下限（每条要求/验收/图示 ≈0.8 页，章基础 2 页）更接近真实成文篇幅。
+    /// 超过页数上限时按顺序装箱：卷数 = ceil(总页数/25)，保证单卷贴近 25 页、
+    /// 尽量不超过 30 页上限；剩余章节数等于剩余卷数时每卷强制保留至少一章。
     pub fn evaluate(sections: &[FrameworkSection]) -> Self {
-        let estimate=|section:&FrameworkSection| if section.estimated_pages>0.0 { section.estimated_pages }
-            else { 2.0 + 0.8*(section.requirements.len()+section.acceptance.len()+section.visuals.len()) as f32 };
+        let density=|section:&FrameworkSection| 2.0 + 0.8*(section.requirements.len()+section.acceptance.len()+section.visuals.len()) as f32;
+        let estimate=|section:&FrameworkSection| section.estimated_pages.max(density(section));
         let estimates:Vec<f32>=sections.iter().map(estimate).collect();
         let total: f32 = estimates.iter().sum();
         let recommended = total > PAGE_LIMIT;
         let mut parts:Vec<SplitPart>=Vec::new();
         if recommended {
-            let target_parts=((total/25.0).ceil() as usize).clamp(2,6);
+            let target_parts=(((total/25.0).ceil() as usize).max(2)).min(sections.len());
+            let per_part=total/target_parts as f32;
             let mut chunk: Vec<(String,f32)>=Vec::new();
             let mut chunk_pages=0.0;
             let mut consumed=0usize;
             for (index,section) in sections.iter().enumerate() {
                 let current=estimates[index];
-                let after=sections.len()-index-1;
-                // 还有剩余卷要留位置，且本卷已接近容量：先把当前卷落袋。
-                let should_close=!chunk.is_empty() && parts.len()+1<target_parts
-                    && (chunk_pages>=PAGE_LIMIT*0.9 || (after>=target_parts-parts.len()-1 && chunk_pages+current>PAGE_LIMIT*0.85));
-                if should_close {
+                let sections_after=sections.len()-index-1;
+                let parts_left_after=target_parts-parts.len()-1;
+                // 剩余章节数恰好等于剩余卷数：每卷必须至少留一章，当前卷立即收口；
+                // 中点启发式：本卷页数加上下一章的一半已超过平均目标时落袋，避免最后一卷爆仓。
+                let must_reserve=parts_left_after>0 && sections_after==parts_left_after && !chunk.is_empty();
+                let balanced=!chunk.is_empty() && chunk_pages+current*0.5>per_part;
+                if (must_reserve||balanced) && sections_after>=parts_left_after {
                     parts.push(Self::part(parts.len(),&sections[consumed..index],&chunk));
                     consumed=index;
                     chunk.clear();
@@ -224,8 +230,8 @@ impl SplitPlan {
 
     fn part(index: usize, sections: &[FrameworkSection], chunk: &[(String,f32)]) -> SplitPart {
         let pages: f32 = chunk.iter().map(|(_,p)|*p).sum();
-        let names=["卷一","卷二","卷三","卷四","卷五","卷六"];
-        let name=names[index.min(names.len()-1)].to_string();
+        const NAMES:[&str;16]=["卷一","卷二","卷三","卷四","卷五","卷六","卷七","卷八","卷九","卷十","卷十一","卷十二","卷十三","卷十四","卷十五","卷十六"];
+        let name=NAMES[index.min(NAMES.len()-1)].to_string();
         let first=sections.first().map(|s|s.title.as_str()).unwrap_or("");
         let last=sections.last().map(|s|s.title.as_str()).unwrap_or("");
         let title=if sections.len()<=1 || first==last { first.to_string() } else { format!("{first} ~ {last}") };

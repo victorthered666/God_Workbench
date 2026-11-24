@@ -33,6 +33,26 @@ async fn setup(repo:&Repository,workflow:&Workflow) -> String {
     project.id
 }
 
+/// 零条目章节的极简框架（密度下限 = 2 页/章）。
+struct LeanFramework;
+#[async_trait]
+impl AgentExecutor for LeanFramework {
+    async fn run(&self, task: AgentTask, _project: &Project, _instruction: String, _feedback: &str) -> gdd_harness::Result<Value> {
+        Ok(match task {
+            AgentTask::Framework=>json!({
+                "title":"小文档","summary":"含 10 章的轻量框架",
+                "sections":(1..=10).map(|i|json!({
+                    "id":format!("sec{i}"),"title":format!("第{i}章"),"purpose":"规则",
+                    "requirements":[],"visuals":[],"acceptance":[],"estimated_pages":2.0
+                })).collect::<Vec<_>>()
+            }),
+            AgentTask::Research=>json!({"summary":"无"}),
+            _=>json!({"summary":"无"}),
+        })
+    }
+    async fn annotate(&self, _project: &Project, _path: &str, _title: &str) -> gdd_harness::Result<Vec<Annotation>> { Ok(vec![]) }
+}
+
 #[tokio::test]
 async fn oversized_framework_produces_balanced_split_plan() {
     let dir=tempfile::tempdir().unwrap();
@@ -65,11 +85,13 @@ async fn oversized_framework_produces_balanced_split_plan() {
 
 #[tokio::test]
 async fn undersized_framework_advises_single_document() {
+    // 章节无条目时密度下限 = 2.0，模型估 2.0 → max 相同，10 章 20 页不触发拆分。
     let dir=tempfile::tempdir().unwrap();
     let config=Config::with_dirs(env!("CARGO_MANIFEST_DIR"),dir.path(),dir.path().join("outputs"),8766);
     config.init().unwrap();
     let repo=Repository::new(dir.path().join("test.db")).unwrap();
-    let workflow=Workflow::new(repo.clone(),Arc::new(SizedFramework{pages:2.0}),config);
+    let lean=Arc::new(LeanFramework);
+    let workflow=Workflow::new(repo.clone(),lean,config);
     let id=setup(&repo,&workflow).await;
     workflow.execute(&id,"framework","").await.unwrap();
     let plan:serde_json::Value=repo.require(&id).unwrap().artifact("split_plan").unwrap().clone();
@@ -88,6 +110,30 @@ async fn string_page_estimates_are_parsed_leniently() {
     assert!(plan.recommended);
     let parsed:Result<gdd_harness::domain::FrameworkSection,_>=serde_json::from_value(json!({"id":"c","title":"丙","purpose":"p","requirements":[],"estimated_pages":"5-6页"}));
     assert_eq!(parsed.unwrap().estimated_pages,5.0);
+}
+
+/// 大密度长文档（191 页，17 章）：装箱后任何一卷不得显著超过 30 页上限，
+/// 每卷至少一章，所有章节恰好覆盖一次。
+#[tokio::test]
+async fn dense_document_packing_avoids_oversized_final_part() {
+    let sections:Vec<gdd_harness::domain::FrameworkSection>=(0..17).map(|i|gdd_harness::domain::FrameworkSection{
+        id:format!("s{i:02}"),title:format!("第{i}章 系统规则密度"),purpose:"p".into(),
+        requirements:(0..6).map(|j|format!("要求{i}-{j}")).collect(),
+        visuals:vec![],acceptance:(0..5).map(|j|format!("验收{i}-{j}")).collect(),
+        estimated_pages:11.0,
+    }).collect();
+    let plan=gdd_harness::domain::SplitPlan::evaluate(&sections);
+    assert!(plan.recommended);
+    let pages:Vec<f32>=plan.parts.iter().map(|p|p.estimated_pages).collect();
+    let total: f32 =pages.iter().sum();
+    assert!((total-187.0).abs()<0.5,"分卷页数之和守恒：{pages:?}");
+    for page in &pages { assert!(page<=&41.0,"单卷不超过上限+单章余量：{pages:?}"); }
+    let mut ids:Vec<String>=plan.parts.iter().flat_map(|p|p.section_ids.clone()).collect();
+    ids.sort();
+    let mut expected:Vec<String>=(0..17).map(|i|format!("s{i:02}")).collect();
+    expected.sort();
+    assert_eq!(ids,expected,"覆盖全部章节且不重复");
+    assert!(plan.parts.iter().all(|p|!p.section_ids.is_empty()));
 }
 
 /// 一键按建议创建分卷子项目：名称、目的、父项目记录与事件齐全。
