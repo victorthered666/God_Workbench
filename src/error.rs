@@ -6,6 +6,8 @@ pub enum AppError {
     #[error("{0}")]
     Workflow(String),
     #[error("{0}")]
+    NotFound(String),
+    #[error("{0}")]
     Invalid(String),
     #[error("{0}")]
     Agent(String),
@@ -36,6 +38,7 @@ impl IntoResponse for AppError {
         let (status, message) = match &self {
             Self::OutputTruncated => (StatusCode::UNPROCESSABLE_ENTITY, self.to_string()),
             Self::Workflow(message) => (StatusCode::CONFLICT, message.clone()),
+            Self::NotFound(message) => (StatusCode::NOT_FOUND, message.clone()),
             Self::Invalid(message) => (StatusCode::BAD_REQUEST, message.clone()),
             Self::Agent(message) | Self::Tool(message) | Self::Other(message) => (StatusCode::BAD_REQUEST, message.clone()),
             Self::Network(message) => (StatusCode::BAD_GATEWAY, message.clone()),

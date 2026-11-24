@@ -45,7 +45,7 @@ impl Repository {
         Ok(result)
     }
 
-    pub fn require(&self, project_id: &str) -> Result<Project> { self.get(project_id)?.ok_or_else(|| AppError::Workflow("项目不存在".into())) }
+    pub fn require(&self, project_id: &str) -> Result<Project> { self.get(project_id)?.ok_or_else(|| AppError::NotFound("项目不存在".into())) }
 
     pub fn list_projects(&self) -> Result<Vec<Value>> {
         let db = self.connection.lock();
@@ -88,6 +88,9 @@ impl Repository {
         db.execute("DELETE FROM events WHERE project_id=?1",[project_id])?;
         db.execute("DELETE FROM evidence WHERE project_id=?1",[project_id])?;
         db.execute("DELETE FROM assets WHERE project_id=?1",[project_id])?;
+        // 会话连续性与全自动开关是按项目存的散键，一并清掉。
+        db.execute("DELETE FROM settings WHERE key LIKE ?1",[format!("session:{project_id}:%")])?;
+        db.execute("DELETE FROM settings WHERE key = ?1",[format!("autorun:{project_id}")])?;
         db.execute("DELETE FROM projects WHERE id=?1",[project_id])?;
         Ok(())
     }

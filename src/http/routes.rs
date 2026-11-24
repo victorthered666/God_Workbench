@@ -1,5 +1,5 @@
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
-use axum::{body::Body, extract::{Path, Query, State}, http::{header, StatusCode}, response::{Html, IntoResponse, Response}, routing::{get, post, put}, Json, Router};
+use axum::{body::Body, extract::{Path, Query, State}, http::{header, StatusCode}, response::{Html, IntoResponse, Response}, routing::{delete, get, post, put}, Json, Router};
 use serde_json::{json, Value};
 use tower_http::services::ServeDir;
 use crate::{agent::runtime::{AgentExecutor, AgentRuntime}, domain::{AgentSettings, GateRequest, ProjectCreate, RevisionRequest, Role}, paths::{contained_file, safe_name}, repository::Repository, runner::Runner, secrets::SecretStore, workflow::Workflow, AppError, Result};
@@ -23,7 +23,7 @@ pub fn app(repo: Repository, secrets: SecretStore, workflow: Workflow, runner: R
         .route("/api/health",get(health))
         .route("/api/projects",post(create))
         .route("/api/projects/audit",post(create_audit))
-        .route("/api/projects/{id}",get(project))
+        .route("/api/projects/{id}",get(project).delete(delete_project))
         .route("/api/projects/{id}/stages/{stage}/feedback",post(feedback))
         .route("/api/projects/{id}/stages/{stage}/approve",post(approve))
         .route("/api/projects/{id}/run/{stage}",post(run))
@@ -91,6 +91,12 @@ async fn create_audit(State(state): State<AppState>, Json(request): Json<crate::
 async fn feedback(State(state): State<AppState>, Path((id,stage)): Path<(String,String)>, Json(request): Json<GateRequest>) -> Result<Json<Value>> {
     if request.feedback.trim().is_empty() && request.content.is_none() { return Err(AppError::Invalid("请填写反馈或修改内容".into())); }
     Ok(Json(json!({"project":state.workflow.feedback(&id,&stage,&request).await?})))
+}
+
+/// 删除项目（带严格前端确认；后端拒绝运行中的项目并校验工作目录位置）。
+async fn delete_project(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>> {
+    state.workflow.delete_project(&id)?;
+    Ok(Json(json!({"status":"deleted","id":id})))
 }
 
 async fn approve(State(state): State<AppState>, Path((id,stage)): Path<(String,String)>) -> Result<Json<Value>> {

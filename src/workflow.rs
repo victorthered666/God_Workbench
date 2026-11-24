@@ -438,6 +438,29 @@ owner 归属标准：正文措辞/数值/引用/表格类矛盾归 writer（可�
     }
 
     /// 三轮上限后的「明确继续」：用户每次点击授权且仅授权一轮追加修订。
+    /// 删除项目：数据库全部记录、按项目散键（会话/全自动开关）与整个工作目录。
+    /// 运行中的项目不可删；工作目录必须位于输出根下、是其直接子目录且以项目 id 前 8 位结尾，
+    /// 任何形态异常都拒绝删除以保护数据。
+    pub fn delete_project(&self, project_id: &str) -> Result<()> {
+        let project=self.repo.require(project_id)?;
+        if project.running() { return Err(AppError::Workflow("任务运行中，请先等待完成或取消后再删除".into())); }
+        let output=self.config.output_dir.canonicalize().unwrap_or_else(|_|self.config.output_dir.clone());
+        let suffix=format!("-{}",project.id.get(..8).unwrap_or(""));
+        let removal:Option<Result<Option<std::path::PathBuf>>>=project.artifacts.get("working_dir").and_then(Value::as_str).map(|root|{
+            // 统一 canonicalize：Windows 下扩展路径前缀（\\?\）会让原始拼接与规范化结果恒不相等。
+            let Ok(canonical)=std::path::PathBuf::from(root).canonicalize() else { return Ok(None); };
+            let parent_ok=canonical.parent().map(|parent|parent==output).unwrap_or(false);
+            let name_ok=canonical.file_name().map(|name|name.to_string_lossy().ends_with(&suffix)).unwrap_or(false);
+            if parent_ok && name_ok { Ok(Some(canonical)) } else { Err(AppError::Invalid("工作目录位置异常或与项目不匹配，已拒绝删除以保护数据".into())) }
+        });
+        if let Some(result)=removal {
+            // 目录不存在或项目残缺无 working_dir：仅清数据库。
+            if let Some(path)=result? { fs::remove_dir_all(path)?; }
+        }
+        self.repo.delete_project(project_id)?;
+        Ok(())
+    }
+
     /// 拆分评估建议分卷时，一键按建议创建子文档项目（每卷独立走五角色流水线）。
     pub fn split_project(&self, project_id: &str) -> Result<Vec<Project>> {
         let project=self.repo.require(project_id)?;

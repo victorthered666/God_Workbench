@@ -258,7 +258,18 @@ function exportModal() {
   openModal(`<h2 id="modal-title">${state.project?.artifacts?.project_type === 'document_review' ? '导出审核报告' : '交付文档与资料'}</h2><p class="modal-intro">${state.project?.artifacts?.project_type === 'document_review' ? '导出结构审核报告（Markdown/HTML/DOCX）与完整资料包。' : '将定稿 Markdown、HTML、DOCX、检索证据、图片与图示、审核历史和来源清单一并整理。审核通过才会生成定稿。'}</p><div class="notice">参考图片用于设计研究，可检索不代表获得再发布授权。交付前请核查来源与使用范围。</div><div class="form-actions"><button class="primary" id="generate-export">生成并整理交付包</button></div><div id="download-links"></div>`);
   $('#generate-export').onclick = async () => { const button = $('#generate-export'); button.disabled = true; button.textContent = '正在生成 DOCX 与归档…'; try { const data = await api(`/api/projects/${state.project.id}/export`); $('#download-links').innerHTML = `<p class="modal-intro">已保存至：${esc(data.directory)}</p><div class="form-actions"><a class="secondary" href="/api/projects/${state.project.id}/download/markdown">Markdown</a><a class="secondary" href="/api/projects/${state.project.id}/download/html">HTML</a><a class="secondary" href="/api/projects/${state.project.id}/download/docx">DOCX</a><a class="primary" href="/api/projects/${state.project.id}/download/zip">完整资料 ZIP</a></div>`; button.hidden = true; } catch (error) { toast(error.message); button.disabled = false; button.textContent = '生成并整理交付包'; } };
 }
-$('#new-project').onclick = newProject; $('#audit-project').onclick = auditProjectModal; $('.brand').onclick = (e) => { e.preventDefault(); showHome(); }; $('#back-home').onclick = showHome; $('#open-settings').onclick = () => settingsModal(); $('#revise-project').onclick = revisionModal; $('#export-project').onclick = exportModal;
+$('#new-project').onclick = newProject; $('#audit-project').onclick = auditProjectModal; $('.brand').onclick = (e) => { e.preventDefault(); showHome(); }; $('#back-home').onclick = showHome; $('#open-settings').onclick = () => settingsModal(); $('#revise-project').onclick = revisionModal; $('#export-project').onclick = exportModal; $('#delete-project').onclick = deleteProjectModal;
+function deleteProjectModal() {
+  const p = state.project; if (!p) return;
+  openModal(`<h2 id="modal-title">删除项目</h2><div class="notice" style="border-left-color:#BF593B"><b>此操作不可恢复。</b>将永久删除：项目全部数据库记录（正文与所有版本、审核历史、检索证据、已下载素材、事件与运行日志）以及整个工作目录（正文导出、HTML/DOCX、图片与图示）。</div><p class="modal-intro">这是强度最高的确认操作：请输入项目名称 <b style="color:#A34430">${esc(p.name)}</b> 以启用删除按钮。</p><div class="field"><span>项目名称</span><input id="delete-confirm-input" class="confirm-input" autocomplete="off" spellcheck="false"></div><div class="form-actions"><button class="secondary" data-close>取消</button><button class="danger" id="delete-confirm-btn" disabled>永久删除</button></div>`);
+  const input = $('#delete-confirm-input'); const button = $('#delete-confirm-btn');
+  input.focus();
+  input.oninput = () => { button.disabled = input.value !== p.name; };
+  button.onclick = async () => {
+    if (input.value !== p.name) return;
+    try { await api(`/api/projects/${p.id}`, { method: 'DELETE' }); closeModal(); toast('项目已永久删除'); state.project = null; await refreshProjects(); showHome(); } catch (error) { toast(error.message); }
+  };
+}
 $('#autorun-toggle').onclick = async () => {
   const p = state.project; if (!p) return;
   const enable = !(state.detail && state.detail.autorun);

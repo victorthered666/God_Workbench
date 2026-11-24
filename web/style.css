@@ -17,3 +17,5 @@
 
 .manual-hint{display:block;margin-top:8px;color:var(--muted);font-size:11px}
 .gate-actions{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:14px}
+
+.danger{background:transparent;color:#A34430;border:1px solid #C98A75;border-radius:5px;padding:10px 18px;font-weight:500}.danger:hover{background:#A34430;color:#fff;border-color:#A34430}.field input.confirm-input{border-color:#C98A75;font-weight:600}
